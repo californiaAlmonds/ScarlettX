@@ -267,9 +267,11 @@ intptr_t SCARLETTX_GI_CALL DevGetBatteryState(void*, uintptr_t out_state, uintpt
     return 0;
 }
 
-// Slot 10 by the public GameInput.h order, which also has 18 device methods.
-// XInput only drives the two main motors; the trigger motors are dropped.
-intptr_t SCARLETTX_GI_CALL DevSetRumbleState(void*, uintptr_t params, uintptr_t, uintptr_t) {
+// Forwards rumble to the first XInput controller on the host. XInput only
+// exposes the two main motors, so the impulse-trigger motors are dropped.
+// Missing XInput or no connected controller are not errors: the guest must
+// never see a rumble call fail.
+void ForwardRumbleToHost(const GAMEINPUT_RUMBLE_PARAMS& p) {
 #if defined(_WIN32)
     struct Vibration {
         uint16_t low, high;
@@ -281,20 +283,28 @@ intptr_t SCARLETTX_GI_CALL DevSetRumbleState(void*, uintptr_t params, uintptr_t,
                             reinterpret_cast<void*>(GetProcAddress(module, "XInputSetState")))
                       : nullptr;
     }();
-    if (params != 0 && params < 0x10000) return 0;  // not a pointer
-    Vibration v{};
-    if (params) {
-        const auto* p = reinterpret_cast<const GAMEINPUT_RUMBLE_PARAMS*>(params);
-        const auto motor = [](float f) {
-            return static_cast<uint16_t>(std::clamp(f, 0.0f, 1.0f) * 65535.0f + 0.5f);
-        };
-        v.low = motor(p->LowFrequency);
-        v.high = motor(p->HighFrequency);
+    if (!set_state) return;
+    const auto motor = [](float f) {
+        return static_cast<uint16_t>(std::clamp(f, 0.0f, 1.0f) * 65535.0f + 0.5f);
+    };
+    Vibration v{motor(p.LowFrequency), motor(p.HighFrequency)};
+    set_state(0, &v);
+    if (GameInputTraceEnabled()) {
+        std::cerr << "[ScarlettX][GameInput] rumble -> XInput0 low=" << v.low << " high=" << v.high << "\n";
     }
-    if (set_state) set_state(0, &v);
 #else
-    (void)params;
+    (void)p;
 #endif
+}
+
+// Slot 10 by the public GameInput.h order, which also has 18 device methods.
+intptr_t SCARLETTX_GI_CALL DevSetRumbleState(void*, uintptr_t params, uintptr_t, uintptr_t) {
+    if (params != 0 && params < 0x10000) return 0;  // not a pointer
+    GAMEINPUT_RUMBLE_PARAMS p{};
+    if (params) {
+        p = *reinterpret_cast<const GAMEINPUT_RUMBLE_PARAMS*>(params);
+    }
+    ForwardRumbleToHost(p);
     return 0;
 }
 
@@ -891,15 +901,18 @@ int32_t GameInputSetRumbleState(
     const GAMEINPUT_RUMBLE_PARAMS* params) {
     auto obj = GetInstance(game_input);
     if (!obj) return kE_HANDLE;
-    std::lock_guard<std::mutex> lk(obj->mu);
     GAMEINPUT_RUMBLE_PARAMS p{};
-    if (params) {
-        p.LowFrequency = std::clamp(params->LowFrequency, 0.0f, 1.0f);
-        p.HighFrequency = std::clamp(params->HighFrequency, 0.0f, 1.0f);
-        p.LeftTrigger = std::clamp(params->LeftTrigger, 0.0f, 1.0f);
-        p.RightTrigger = std::clamp(params->RightTrigger, 0.0f, 1.0f);
+    {
+        std::lock_guard<std::mutex> lk(obj->mu);
+        if (params) {
+            p.LowFrequency = std::clamp(params->LowFrequency, 0.0f, 1.0f);
+            p.HighFrequency = std::clamp(params->HighFrequency, 0.0f, 1.0f);
+            p.LeftTrigger = std::clamp(params->LeftTrigger, 0.0f, 1.0f);
+            p.RightTrigger = std::clamp(params->RightTrigger, 0.0f, 1.0f);
+        }
+        obj->rumble[device_id] = p;
     }
-    obj->rumble[device_id] = p;
+    ForwardRumbleToHost(p);
     return kS_OK;
 }
 

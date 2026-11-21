@@ -155,6 +155,21 @@ int main() {
     SX_CHECK(std::fabs(got_rumble.LowFrequency - 0.6f) < 1e-5f);
     SX_CHECK(std::fabs(got_rumble.LeftTrigger - 0.8f) < 1e-5f);
 
+    // Out-of-range values clamp to [0, 1]; the state that is read back is
+    // exactly the state that is forwarded to the host controller.
+    const GAMEINPUT_RUMBLE_PARAMS hot{1.5f, -0.5f, 2.0f, -1.0f};
+    SX_CHECK_EQ(GameInputSetRumbleState(gi, dev_ids[0], &hot), 0);
+    SX_CHECK_EQ(GameInputGetRumbleState(gi, dev_ids[0], &got_rumble), 0);
+    SX_CHECK(std::fabs(got_rumble.LowFrequency - 1.0f) < 1e-5f);
+    SX_CHECK(std::fabs(got_rumble.HighFrequency - 0.0f) < 1e-5f);
+
+    // Null parameters stop the rumble (state zeroed, no error) with or
+    // without a host controller connected.
+    SX_CHECK_EQ(GameInputSetRumbleState(gi, dev_ids[0], nullptr), 0);
+    SX_CHECK_EQ(GameInputGetRumbleState(gi, dev_ids[0], &got_rumble), 0);
+    SX_CHECK(got_rumble.LowFrequency == 0.0f && got_rumble.HighFrequency == 0.0f &&
+             got_rumble.LeftTrigger == 0.0f && got_rumble.RightTrigger == 0.0f);
+
     // 5. Keyboard injection & reading
     GAMEINPUT_KEY_STATE keys[2]{};
     keys[0].VirtualKey = 'W';
