@@ -454,8 +454,20 @@ void ReadHostGamepad(GAMEINPUT_GAMEPAD_STATE* out) {
                             reinterpret_cast<void*>(GetProcAddress(module, "XInputGetState")))
                       : nullptr;
     }();
+    // The controller is not always in slot 0. Empty slots are slow to query,
+    // so the others are only tried once a second.
+    static std::atomic<DWORD> pad{0};
+    static std::atomic<ULONGLONG> next_scan{0};
     XInputStateBlock host{};
-    if (get_state && get_state(0, &host) == 0) {
+    bool connected = get_state && get_state(pad.load(), &host) == 0;
+    if (!connected && get_state && GetTickCount64() >= next_scan.load()) {
+        next_scan.store(GetTickCount64() + 1000);
+        for (DWORD i = 0; i < 4 && !connected; ++i) {
+            connected = get_state(i, &host) == 0;
+            if (connected) pad.store(i);
+        }
+    }
+    if (connected) {
         static const struct {
             uint16_t xinput;
             uint32_t gameinput;
