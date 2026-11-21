@@ -267,6 +267,37 @@ intptr_t SCARLETTX_GI_CALL DevGetBatteryState(void*, uintptr_t out_state, uintpt
     return 0;
 }
 
+// Slot 10 by the public GameInput.h order, which also has 18 device methods.
+// XInput only drives the two main motors; the trigger motors are dropped.
+intptr_t SCARLETTX_GI_CALL DevSetRumbleState(void*, uintptr_t params, uintptr_t, uintptr_t) {
+#if defined(_WIN32)
+    struct Vibration {
+        uint16_t low, high;
+    };
+    using XInputSetStateFn = DWORD (WINAPI*)(DWORD, Vibration*);
+    static const XInputSetStateFn set_state = [] {
+        const HMODULE module = LoadLibraryW(L"xinput1_4.dll");
+        return module ? reinterpret_cast<XInputSetStateFn>(
+                            reinterpret_cast<void*>(GetProcAddress(module, "XInputSetState")))
+                      : nullptr;
+    }();
+    if (params != 0 && params < 0x10000) return 0;  // not a pointer
+    Vibration v{};
+    if (params) {
+        const auto* p = reinterpret_cast<const GAMEINPUT_RUMBLE_PARAMS*>(params);
+        const auto motor = [](float f) {
+            return static_cast<uint16_t>(std::clamp(f, 0.0f, 1.0f) * 65535.0f + 0.5f);
+        };
+        v.low = motor(p->LowFrequency);
+        v.high = motor(p->HighFrequency);
+    }
+    if (set_state) set_state(0, &v);
+#else
+    (void)params;
+#endif
+    return 0;
+}
+
 template <int Slot>
 intptr_t SCARLETTX_GI_CALL DevTracedSlot(void*, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     if (GameInputTraceEnabled()) {
@@ -286,6 +317,7 @@ std::array<GiComFn, 21> BuildDeviceVtable() {
     vtbl[3] = &DevGetDeviceInfo;
     vtbl[4] = &DevGetDeviceStatus;
     vtbl[5] = &DevGetBatteryState;
+    vtbl[10] = &DevSetRumbleState;
     return vtbl;
 }
 

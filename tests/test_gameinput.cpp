@@ -78,6 +78,7 @@ constexpr int kGiGetCurrentReading = 4;
 constexpr int kGiRegisterDeviceCallback = 9;
 constexpr int kDevGetDeviceInfo = 3;
 constexpr int kDevGetDeviceStatus = 4;
+constexpr int kDevSetRumbleState = 10;
 constexpr int kReadGetInputKind = 3;
 constexpr int kReadGetSequenceNumber = 4;
 constexpr int kReadGetTimestamp = 5;
@@ -216,6 +217,11 @@ int main() {
         std::memcpy(&name_text, name + 8, sizeof(name_text));
         SX_CHECK(name_text != nullptr && std::strlen(name_text) > 0);
         SX_CHECK_EQ(Call(device, kDevGetDeviceStatus) & 3, intptr_t{3});
+
+        // Rumble is accepted, with or without a host controller; null stops it.
+        const GAMEINPUT_RUMBLE_PARAMS buzz{0.25f, 0.25f, 0.0f, 0.0f};
+        SX_CHECK_EQ(Call(device, kDevSetRumbleState, &buzz), intptr_t{0});
+        SX_CHECK_EQ(Call(device, kDevSetRumbleState, static_cast<void*>(nullptr)), intptr_t{0});
 
         // Readings carry the injected state.
         GAMEINPUT_GAMEPAD_STATE pressed{};
