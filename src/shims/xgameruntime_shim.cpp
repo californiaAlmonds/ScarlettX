@@ -622,7 +622,13 @@ XGameResult XGameSaveEnumerateContainerInfo(
     if (!provider || !callback) {
         return XGR_E_INVALIDARG;
     }
-    std::lock_guard<std::mutex> lock(provider->mutex);
+    struct Entry {
+        std::string name;
+        uint32_t blob_count;
+        uint64_t total_size;
+    };
+    std::vector<Entry> entries;
+    std::unique_lock<std::mutex> lock(provider->mutex);
     std::error_code ec;
     if (!fs::exists(provider->root_dir, ec)) {
         return XGR_S_OK;
@@ -640,11 +646,15 @@ XGameResult XGameSaveEnumerateContainerInfo(
                 total_size += f.file_size(ec);
             }
         }
+        entries.push_back({cname, blob_count, total_size});
+    }
+    lock.unlock();
+    for (const auto& entry : entries) {
         XGameSaveContainerInfo info{};
-        info.name = cname.c_str();
-        info.displayName = cname.c_str();
-        info.blobCount = blob_count;
-        info.totalSize = total_size;
+        info.name = entry.name.c_str();
+        info.displayName = entry.name.c_str();
+        info.blobCount = entry.blob_count;
+        info.totalSize = entry.total_size;
         info.lastModifiedTime = 0;
         info.needsSync = false;
         if (!callback(&info, context)) {
@@ -953,7 +963,8 @@ XGameResult XGameSaveEnumerateBlobInfo(
         return XGR_E_INVALIDARG;
     }
     auto* provider = container->provider;
-    std::lock_guard<std::mutex> lock(provider->mutex);
+    std::vector<std::pair<std::string, uint32_t>> entries;
+    std::unique_lock<std::mutex> lock(provider->mutex);
     std::error_code ec;
     if (!fs::exists(container->dir_path, ec)) {
         return XGR_S_OK;
@@ -962,10 +973,14 @@ XGameResult XGameSaveEnumerateBlobInfo(
         if (!entry.is_regular_file(ec)) {
             continue;
         }
-        const std::string bname = entry.path().filename().string();
+        entries.emplace_back(entry.path().filename().string(),
+                             static_cast<uint32_t>(entry.file_size(ec)));
+    }
+    lock.unlock();
+    for (const auto& [bname, size] : entries) {
         XGameSaveBlobInfo info{};
         info.name = bname.c_str();
-        info.size = static_cast<uint32_t>(entry.file_size(ec));
+        info.size = size;
         if (!callback(&info, context)) {
             break;
         }

@@ -80,6 +80,29 @@ bool SCARLETTX_GDK_CALLBACK EnumBlobsCb(const XGameSaveBlobInfo* info, void* ctx
     return true;
 }
 
+struct ReentrantEnum {
+    XGameSaveProviderHandle provider = nullptr;
+    int quota_calls = 0;
+};
+
+bool SCARLETTX_GDK_CALLBACK ReentrantContainersCb(const XGameSaveContainerInfo* /*info*/, void* ctx) {
+    auto* reentrant = static_cast<ReentrantEnum*>(ctx);
+    int64_t quota = 0;
+    if (XGameSaveGetRemainingQuota(reentrant->provider, &quota) == XGR_S_OK) {
+        ++reentrant->quota_calls;
+    }
+    return true;
+}
+
+bool SCARLETTX_GDK_CALLBACK ReentrantBlobsCb(const XGameSaveBlobInfo* /*info*/, void* ctx) {
+    auto* reentrant = static_cast<ReentrantEnum*>(ctx);
+    int64_t quota = 0;
+    if (XGameSaveGetRemainingQuota(reentrant->provider, &quota) == XGR_S_OK) {
+        ++reentrant->quota_calls;
+    }
+    return true;
+}
+
 void* SCARLETTX_GDK_CALLBACK CustomAlloc(size_t sz, uint64_t attr) {
     g_custom_allocs.fetch_add(1);
     return XMemAllocDefault(sz, attr);
@@ -266,6 +289,13 @@ int main() {
     std::vector<std::string> blobs;
     CHECK(XGameSaveEnumerateBlobInfo(container, &blobs, EnumBlobsCb) == XGR_S_OK);
     CHECK(blobs.size() == 1 && blobs[0] == "profile.dat");
+
+    // Enumeration callbacks may call back into XGameSave
+    ReentrantEnum reentrant{provider};
+    CHECK(XGameSaveEnumerateContainerInfo(provider, &reentrant, ReentrantContainersCb) == XGR_S_OK);
+    CHECK(reentrant.quota_calls == 1);
+    CHECK(XGameSaveEnumerateBlobInfo(container, &reentrant, ReentrantBlobsCb) == XGR_S_OK);
+    CHECK(reentrant.quota_calls == 2);
 
     // Sync read
     const char* read_names[] = {"profile.dat"};
