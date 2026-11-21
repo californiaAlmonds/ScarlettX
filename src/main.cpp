@@ -11,7 +11,7 @@ void PrintUsage() {
     std::cout << "ScarlettX — Xbox Series X|S (Scarlett) HLE Emulator\n"
               << "Usage:\n"
               << "  scarlettx inspect <package_dir>\n"
-              << "  scarlettx boot <package_dir> [--headless] [--in-process] [--gpu|--warp] [--trace] [--stats] [--force-relocate] [--frames N] [--rt-dump path.ppm] [--raster-dump path.ppm]\n"
+              << "  scarlettx boot <package_dir> [--headless] [--in-process] [--gpu|--warp] [--trace] [--stats] [--uncapped] [--force-relocate] [--frames N] [--rt-dump path.ppm] [--raster-dump path.ppm]\n"
               << "  scarlettx diag\n";
 }
 
@@ -76,6 +76,8 @@ int main(int argc, char** argv) {
                 cfg.trace = true;
             } else if (arg == "--stats") {
                 cfg.stats = true;
+            } else if (arg == "--uncapped") {
+                cfg.uncapped = true;
             } else if (arg == "--force-relocate") {
                 cfg.force_relocate = true;
             } else if (arg == "--frames" && i + 1 < argc) {

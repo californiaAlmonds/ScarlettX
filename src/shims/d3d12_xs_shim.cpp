@@ -3737,8 +3737,13 @@ intptr_t SCARLETTX_GDK_CALLBACK ProxyCreateCommandListX(
 }
 
 // Observed Xbox device slot 78 (+0x270) at 0x14052f501: SetFrameIntervalX(pOutput, intervalUs=0x411b, period=2, flags=0).
+std::atomic<uint32_t> g_frame_interval_us{0};
+
 intptr_t SCARLETTX_GDK_CALLBACK ProxySetFrameIntervalX(
     void* /*self*/, uintptr_t pOutput, uintptr_t intervalUs, uintptr_t period) {
+    // The period is the allowed latency in intervals, not a rate divisor.
+    g_frame_interval_us.store(intervalUs <= 1000000 ? static_cast<uint32_t>(intervalUs) : 0,
+                              std::memory_order_relaxed);
     if (TraceEnabled()) {
         std::cerr << "[ScarlettX][d3d12_xs] XboxID3D12Device::SetFrameIntervalX(out=0x" << std::hex << pOutput
                   << ", interval_us=" << std::dec << intervalUs << ", period=" << period << ") -> S_OK\n";
@@ -3759,9 +3764,51 @@ intptr_t SCARLETTX_GDK_CALLBACK ProxyScheduleFrameEventX(
 // Observed Xbox device slot 80 (+0x280) at 0x14008ced6:
 //   WaitFrameEventX(eventType=0, timeoutMs=INFINITE, pEvent=NULL, flags=0, pToken=&out_u64)
 std::atomic<uint64_t> g_frame_pipeline_token{1};
+
+// Blocks until the next frame origin, one interval after the previous one.
+void WaitForFrameOrigin() {
+#if defined(_WIN32)
+    static const bool uncapped = [] {
+        const char* v = std::getenv("SCARLETTX_UNCAPPED");
+        return v && v[0] != '\0' && v[0] != '0';
+    }();
+    const uint32_t interval_us = g_frame_interval_us.load(std::memory_order_relaxed);
+    if (uncapped || interval_us == 0) return;
+
+    static std::mutex mu;
+    static int64_t next = 0;
+    static const int64_t freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart;
+    }();
+    static const HANDLE timer = [] {
+        HANDLE t = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* high resolution */, TIMER_ALL_ACCESS);
+        return t ? t : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    }();
+
+    std::lock_guard<std::mutex> lock(mu);
+    const int64_t interval = freq * interval_us / 1000000;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    if (now.QuadPart > next + interval) next = now.QuadPart;  // fell behind, start over
+    if (now.QuadPart < next) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -((next - now.QuadPart) * 10000000 / freq);
+        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(timer, INFINITE);
+        } else {
+            Sleep(static_cast<DWORD>((next - now.QuadPart) * 1000 / freq));
+        }
+    }
+    next += interval;
+#endif
+}
+
 intptr_t SCARLETTX_GDK_CALLBACK ProxyWaitFrameEventX(
     void* /*self*/, uintptr_t eventType, uintptr_t timeoutMs, uintptr_t pEvent,
     uintptr_t flags, uintptr_t pToken) {
+    if (eventType == 0) WaitForFrameOrigin();
     uint64_t tok = g_frame_pipeline_token.fetch_add(1, std::memory_order_relaxed);
     if (pToken) {
         *reinterpret_cast<uint64_t*>(pToken) = tok;

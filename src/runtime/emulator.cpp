@@ -100,7 +100,7 @@ Status Emulator::BootPackage(const std::string& package_dir) {
     set_env("SCARLETTX_PREFER_WARP", config_.prefer_warp ? "1" : "0");
     set_env("SCARLETTX_TRACE", config_.trace ? "1" : "0");
     set_env("SCARLETTX_STATS", config_.stats ? "1" : "0");
-    set_env("SCARLETTX_STATS", config_.stats ? "1" : "0");
+    set_env("SCARLETTX_UNCAPPED", config_.uncapped ? "1" : "0");
     if (!report.config.title_id.empty()) {
         set_env("SCARLETTX_TITLE_ID", report.config.title_id.c_str());
     }

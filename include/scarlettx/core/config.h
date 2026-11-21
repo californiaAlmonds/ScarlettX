@@ -13,6 +13,7 @@ struct EmulatorConfig {
     bool enable_debug_layer = false;
     bool trace = false;
     bool stats = false;
+    bool uncapped = false;
     bool in_process = false;
     bool force_relocate = false;
     uint32_t render_width = 320;
