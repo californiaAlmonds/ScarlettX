@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cwchar>
 
 #if defined(_WIN32)
 #  if defined(SCARLETTX_BUILDING_XGAMERUNTIME)
@@ -330,6 +331,59 @@ enum XUserPrivilegeDenyReason : uint32_t {
     XUserPrivilegeDenyReason_Unknown = 0xFFFFFFFFu,
 };
 
+enum XUserGamerPictureSize : uint32_t {
+    XUserGamerPictureSize_Small = 0,
+    XUserGamerPictureSize_Medium = 1,
+    XUserGamerPictureSize_Large = 2,
+    XUserGamerPictureSize_ExtraLarge = 3,
+};
+
+enum XUserGetTokenAndSignatureOptions : uint32_t {
+    XUserGetTokenAndSignatureOptions_None = 0x00,
+    XUserGetTokenAndSignatureOptions_ForceRefresh = 0x01,
+    XUserGetTokenAndSignatureOptions_AllUsers = 0x02,
+};
+
+enum XUserChangeEvent : uint32_t {
+    XUserChangeEvent_SignedInLocally = 0,
+    XUserChangeEvent_SigningOut = 1,
+    XUserChangeEvent_SignedOut = 2,
+    XUserChangeEvent_Gamertag = 3,
+    XUserChangeEvent_GamerPicture = 4,
+    XUserChangeEvent_Privileges = 5,
+};
+
+struct XUserGetTokenAndSignatureHttpHeader {
+    const char* name;
+    const char* value;
+};
+
+struct XUserGetTokenAndSignatureData {
+    size_t tokenSize;
+    size_t signatureSize;
+    const char* token;
+    const char* signature;
+};
+
+struct XUserGetTokenAndSignatureUtf16HttpHeader {
+    const wchar_t* name;
+    const wchar_t* value;
+};
+
+struct XUserGetTokenAndSignatureUtf16Data {
+    size_t tokenCount;
+    size_t signatureCount;
+    const wchar_t* token;
+    const wchar_t* signature;
+};
+
+typedef struct XUserSignOutDeferral* XUserSignOutDeferralHandle;
+
+typedef void(SCARLETTX_GDK_CALLBACK XUserChangeEventCallback)(
+    void* context,
+    XUserLocalId userLocalId,
+    XUserChangeEvent event);
+
 SCARLETTX_XGR_API XGameResult XUserAddAsync(
     XUserAddOptions options,
     XAsyncBlock* async);
@@ -340,14 +394,31 @@ SCARLETTX_XGR_API XGameResult XUserDuplicateHandle(
     XUserHandle handle,
     XUserHandle* duplicatedHandle);
 SCARLETTX_XGR_API void XUserCloseHandle(XUserHandle user);
+SCARLETTX_XGR_API int32_t XUserCompare(XUserHandle user1, XUserHandle user2);
 SCARLETTX_XGR_API XGameResult XUserGetId(XUserHandle user, uint64_t* userId);
+SCARLETTX_XGR_API XGameResult XUserFindUserById(uint64_t userId, XUserHandle* handle);
 SCARLETTX_XGR_API XGameResult XUserGetLocalId(XUserHandle user, XUserLocalId* userLocalId);
+SCARLETTX_XGR_API XGameResult XUserFindUserByLocalId(
+    XUserLocalId userLocalId,
+    XUserHandle* handle);
 SCARLETTX_XGR_API XGameResult XUserGetGamertag(
     XUserHandle user,
     XUserGamertagComponent gamertagComponent,
     size_t gamertagSize,
     char* gamertag,
     size_t* gamertagUsed);
+SCARLETTX_XGR_API XGameResult XUserGetGamerPictureAsync(
+    XUserHandle user,
+    XUserGamerPictureSize pictureSize,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserGetGamerPictureResultSize(
+    XAsyncBlock* async,
+    size_t* bufferSize);
+SCARLETTX_XGR_API XGameResult XUserGetGamerPictureResult(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    size_t* bufferUsed);
 SCARLETTX_XGR_API XGameResult XUserGetState(XUserHandle user, XUserState* state);
 SCARLETTX_XGR_API XGameResult XUserGetAgeGroup(XUserHandle user, XUserAgeGroup* ageGroup);
 SCARLETTX_XGR_API XGameResult XUserGetIsGuest(XUserHandle user, bool* isGuest);
@@ -358,6 +429,72 @@ SCARLETTX_XGR_API XGameResult XUserCheckPrivilege(
     XUserPrivilege privilege,
     bool* hasPrivilege,
     XUserPrivilegeDenyReason* reason);
+SCARLETTX_XGR_API XGameResult XUserResolvePrivilegeWithUiAsync(
+    XUserHandle user,
+    XUserPrivilegeOptions options,
+    XUserPrivilege privilege,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserResolvePrivilegeWithUiResult(XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureAsync(
+    XUserHandle user,
+    XUserGetTokenAndSignatureOptions options,
+    const char* method,
+    const char* url,
+    size_t headerCount,
+    const XUserGetTokenAndSignatureHttpHeader* headers,
+    size_t bodySize,
+    const void* bodyBuffer,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureResultSize(
+    XAsyncBlock* async,
+    size_t* bufferSize);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureResult(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    XUserGetTokenAndSignatureData** ptrToBuffer,
+    size_t* bufferUsed);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureUtf16Async(
+    XUserHandle user,
+    XUserGetTokenAndSignatureOptions options,
+    const wchar_t* method,
+    const wchar_t* url,
+    size_t headerCount,
+    const XUserGetTokenAndSignatureUtf16HttpHeader* headers,
+    size_t bodySize,
+    const void* bodyBuffer,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureUtf16ResultSize(
+    XAsyncBlock* async,
+    size_t* bufferSize);
+SCARLETTX_XGR_API XGameResult XUserGetTokenAndSignatureUtf16Result(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    XUserGetTokenAndSignatureUtf16Data** ptrToBuffer,
+    size_t* bufferUsed);
+SCARLETTX_XGR_API XGameResult XUserResolveIssueWithUiAsync(
+    XUserHandle user,
+    const char* url,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserResolveIssueWithUiResult(XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserResolveIssueWithUiUtf16Async(
+    XUserHandle user,
+    const wchar_t* url,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserResolveIssueWithUiUtf16Result(XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XUserRegisterForChangeEvent(
+    XTaskQueueHandle queue,
+    void* context,
+    XUserChangeEventCallback* callback,
+    XTaskQueueRegistrationToken* token);
+SCARLETTX_XGR_API bool XUserUnregisterForChangeEvent(
+    XTaskQueueRegistrationToken token,
+    bool wait);
+SCARLETTX_XGR_API XGameResult XUserGetSignOutDeferral(
+    XUserSignOutDeferralHandle* deferral);
+SCARLETTX_XGR_API void XUserCloseSignOutDeferralHandle(
+    XUserSignOutDeferralHandle deferral);
 // Legacy convenience helper retained for early synthetic tests.
 SCARLETTX_XGR_API XGameResult XUserGetDefaultXuid(uint64_t* out_xuid);
 

@@ -258,6 +258,139 @@ int main() {
     CHECK(XUserCheckPrivilege(user, XUserPrivilegeOptions_None, XUserPrivilege_Multiplayer, &has_priv, &deny) == XGR_S_OK);
     CHECK(has_priv && deny == XUserPrivilegeDenyReason_None);
 
+    // XUserCompare, XUserFindUserById, XUserFindUserByLocalId
+    {
+        XUserHandle found_by_id = nullptr;
+        CHECK(XUserFindUserById(xuid, &found_by_id) == XGR_S_OK && found_by_id != nullptr);
+        CHECK(XUserCompare(user, found_by_id) == 0);
+        CHECK(XUserCompare(user, nullptr) > 0);
+        CHECK(XUserCompare(nullptr, user) < 0);
+        CHECK(XUserCompare(nullptr, nullptr) == 0);
+        XUserCloseHandle(found_by_id);
+
+        XUserHandle missing = nullptr;
+        CHECK(XUserFindUserById(0xDEADBEEFull, &missing) == XGR_E_NOTFOUND && missing == nullptr);
+
+        XUserHandle found_by_local = nullptr;
+        CHECK(XUserFindUserByLocalId(local_id, &found_by_local) == XGR_S_OK && found_by_local != nullptr);
+        CHECK(XUserCompare(user, found_by_local) == 0);
+        XUserCloseHandle(found_by_local);
+        CHECK(XUserFindUserByLocalId(XUserLocalId{999999u}, &missing) == XGR_E_NOTFOUND && missing == nullptr);
+    }
+
+    // XUserGetGamerPictureAsync / ResultSize / Result (valid PNG + IHDR dims)
+    {
+        const struct { XUserGamerPictureSize sz; uint32_t dim; } kPicCases[] = {
+            {XUserGamerPictureSize_Small, 64},
+            {XUserGamerPictureSize_Medium, 208},
+            {XUserGamerPictureSize_Large, 424},
+            {XUserGamerPictureSize_ExtraLarge, 1080},
+        };
+        for (const auto& tc : kPicCases) {
+            XAsyncBlock pic_async{};
+            pic_async.queue = tp_q;
+            CHECK(XUserGetGamerPictureAsync(user, tc.sz, &pic_async) == XGR_S_OK);
+            CHECK(XAsyncGetStatus(&pic_async, true) == XGR_S_OK);
+            size_t pic_size = 0;
+            CHECK(XUserGetGamerPictureResultSize(&pic_async, &pic_size) == XGR_S_OK && pic_size > 32);
+            // Too-small buffer must fail cleanly without releasing the result.
+            uint8_t tiny[8]{};
+            size_t pic_used = 0;
+            CHECK(XUserGetGamerPictureResult(&pic_async, sizeof(tiny), tiny, &pic_used) == XGR_E_NOT_SUFFICIENT_BUFFER);
+            CHECK(pic_used == pic_size);
+            std::vector<uint8_t> png(pic_size, 0);
+            CHECK(XUserGetGamerPictureResult(&pic_async, png.size(), png.data(), &pic_used) == XGR_S_OK);
+            CHECK(pic_used == pic_size);
+            static constexpr uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+            CHECK(std::memcmp(png.data(), kPngSig, 8) == 0);
+            const uint32_t w = (static_cast<uint32_t>(png[16]) << 24) | (static_cast<uint32_t>(png[17]) << 16) |
+                               (static_cast<uint32_t>(png[18]) << 8) | static_cast<uint32_t>(png[19]);
+            const uint32_t h = (static_cast<uint32_t>(png[20]) << 24) | (static_cast<uint32_t>(png[21]) << 16) |
+                               (static_cast<uint32_t>(png[22]) << 8) | static_cast<uint32_t>(png[23]);
+            CHECK(w == tc.dim && h == tc.dim);
+        }
+    }
+
+    // XUserGetTokenAndSignatureAsync / ResultSize / Result (UTF-8 and UTF-16)
+    {
+        XAsyncBlock tok_async{};
+        tok_async.queue = tp_q;
+        CHECK(XUserGetTokenAndSignatureAsync(user, XUserGetTokenAndSignatureOptions_None, "GET",
+                                             "https://xboxlive.example/title", 0, nullptr, 0, nullptr,
+                                             &tok_async) == XGR_S_OK);
+        CHECK(XAsyncGetStatus(&tok_async, true) == XGR_S_OK);
+        size_t tok_buf_size = 0;
+        CHECK(XUserGetTokenAndSignatureResultSize(&tok_async, &tok_buf_size) == XGR_S_OK);
+        CHECK(tok_buf_size > sizeof(XUserGetTokenAndSignatureData));
+
+        alignas(XUserGetTokenAndSignatureData) uint8_t small_buf[16]{};
+        XUserGetTokenAndSignatureData* tok_ptr = nullptr;
+        size_t tok_used = 0;
+        CHECK(XUserGetTokenAndSignatureResult(&tok_async, sizeof(small_buf), small_buf, &tok_ptr, &tok_used) ==
+              XGR_E_NOT_SUFFICIENT_BUFFER);
+        CHECK(tok_used == tok_buf_size && tok_ptr == nullptr);
+
+        std::vector<uint8_t> tok_buf(tok_buf_size, 0);
+        CHECK(XUserGetTokenAndSignatureResult(&tok_async, tok_buf.size(), tok_buf.data(), &tok_ptr, &tok_used) ==
+              XGR_S_OK);
+        CHECK(tok_ptr != nullptr && tok_used == tok_buf_size);
+        CHECK(tok_ptr->token != nullptr && tok_ptr->tokenSize == std::strlen(tok_ptr->token) + 1);
+        CHECK(tok_ptr->signature != nullptr && tok_ptr->signatureSize == std::strlen(tok_ptr->signature) + 1);
+        CHECK(std::strncmp(tok_ptr->token, "XBL3.0 ", 7) == 0);
+
+        XAsyncBlock tok16_async{};
+        tok16_async.queue = tp_q;
+        CHECK(XUserGetTokenAndSignatureUtf16Async(user, XUserGetTokenAndSignatureOptions_ForceRefresh, L"POST",
+                                                  L"https://xboxlive.example/title", 0, nullptr, 0, nullptr,
+                                                  &tok16_async) == XGR_S_OK);
+        CHECK(XAsyncGetStatus(&tok16_async, true) == XGR_S_OK);
+        size_t tok16_size = 0;
+        CHECK(XUserGetTokenAndSignatureUtf16ResultSize(&tok16_async, &tok16_size) == XGR_S_OK);
+        std::vector<uint8_t> tok16_buf(tok16_size, 0);
+        XUserGetTokenAndSignatureUtf16Data* tok16_ptr = nullptr;
+        size_t tok16_used = 0;
+        CHECK(XUserGetTokenAndSignatureUtf16Result(&tok16_async, tok16_buf.size(), tok16_buf.data(), &tok16_ptr,
+                                                   &tok16_used) == XGR_S_OK);
+        CHECK(tok16_ptr != nullptr && tok16_used == tok16_size);
+        CHECK(tok16_ptr->token != nullptr && tok16_ptr->tokenCount == std::wcslen(tok16_ptr->token) + 1);
+        CHECK(tok16_ptr->signature != nullptr && tok16_ptr->signatureCount == std::wcslen(tok16_ptr->signature) + 1);
+    }
+
+    // XUserResolvePrivilegeWithUiAsync, XUserResolveIssueWithUiAsync (UTF-8 & UTF-16)
+    {
+        XAsyncBlock priv_async{};
+        priv_async.queue = tp_q;
+        CHECK(XUserResolvePrivilegeWithUiAsync(user, XUserPrivilegeOptions_None, XUserPrivilege_Multiplayer,
+                                               &priv_async) == XGR_S_OK);
+        CHECK(XUserResolvePrivilegeWithUiResult(&priv_async) == XGR_S_OK);
+
+        XAsyncBlock issue_async{};
+        issue_async.queue = tp_q;
+        CHECK(XUserResolveIssueWithUiAsync(user, "https://xboxlive.example/issue", &issue_async) == XGR_S_OK);
+        CHECK(XUserResolveIssueWithUiResult(&issue_async) == XGR_S_OK);
+
+        XAsyncBlock issue16_async{};
+        issue16_async.queue = tp_q;
+        CHECK(XUserResolveIssueWithUiUtf16Async(user, L"https://xboxlive.example/issue", &issue16_async) == XGR_S_OK);
+        CHECK(XUserResolveIssueWithUiUtf16Result(&issue16_async) == XGR_S_OK);
+    }
+
+    // XUserRegisterForChangeEvent / UnregisterForChangeEvent & SignOutDeferral
+    {
+        XUserChangeEventCallback* dummy_cb = [](void*, XUserLocalId, XUserChangeEvent) {};
+        XTaskQueueRegistrationToken chg_tok{};
+        CHECK(XUserRegisterForChangeEvent(tp_q, nullptr, dummy_cb, &chg_tok) == XGR_S_OK);
+        CHECK(chg_tok.token != 0);
+        CHECK(XUserUnregisterForChangeEvent(chg_tok, true) == true);
+        CHECK(XUserUnregisterForChangeEvent(chg_tok, true) == false);
+
+        XUserSignOutDeferralHandle deferral = nullptr;
+        CHECK(XUserGetSignOutDeferral(&deferral) == XGR_S_OK && deferral != nullptr);
+        CHECK(XSystemIsHandleValid(deferral));
+        XUserCloseSignOutDeferralHandle(deferral);
+        CHECK(!XSystemIsHandleValid(deferral));
+    }
+
     // 6. XGameSave (async init, write, sync + async read, enumerate, delete)
     XAsyncBlock save_init_async{};
     save_init_async.queue = tp_q;

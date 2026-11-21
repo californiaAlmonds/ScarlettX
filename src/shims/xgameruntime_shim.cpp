@@ -123,6 +123,146 @@ struct XUser {
     bool is_guest = false;
 };
 
+struct XUserSignOutDeferral {
+    uint64_t id = 0;
+};
+
+namespace {
+
+std::mutex g_active_users_mutex;
+std::vector<XUser*> g_active_users;
+
+std::mutex g_user_change_mutex;
+uint64_t g_user_change_next_token = 0;
+std::unordered_set<uint64_t> g_user_change_tokens;
+
+std::atomic<uint64_t> g_signout_deferral_next_id{1};
+
+uint32_t Crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+uint32_t Adler32(const uint8_t* data, size_t len) {
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (size_t i = 0; i < len; ++i) {
+        a = (a + data[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+void AppendBe32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    out.push_back(static_cast<uint8_t>(v & 0xFFu));
+}
+
+void AppendPngChunk(std::vector<uint8_t>& png, const char type[4], const std::vector<uint8_t>& payload) {
+    AppendBe32(png, static_cast<uint32_t>(payload.size()));
+    const size_t type_pos = png.size();
+    png.insert(png.end(), type, type + 4);
+    png.insert(png.end(), payload.begin(), payload.end());
+    const uint32_t crc = Crc32(png.data() + type_pos, 4 + payload.size());
+    AppendBe32(png, crc);
+}
+
+// Builds a valid RFC 2083 1-bit indexed-color PNG matching the requested Xbox
+// gamer picture dimensions (Small=64, Medium=208, Large=424, ExtraLarge=1080).
+std::vector<uint8_t> BuildSyntheticGamerPicturePng(XUserGamerPictureSize size) {
+    uint32_t dim = 64;
+    switch (size) {
+        case XUserGamerPictureSize_Small: dim = 64; break;
+        case XUserGamerPictureSize_Medium: dim = 208; break;
+        case XUserGamerPictureSize_Large: dim = 424; break;
+        case XUserGamerPictureSize_ExtraLarge: dim = 1080; break;
+        default: dim = 64; break;
+    }
+
+    static constexpr uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::vector<uint8_t> png(kPngSig, kPngSig + 8);
+
+    std::vector<uint8_t> ihdr;
+    AppendBe32(ihdr, dim);
+    AppendBe32(ihdr, dim);
+    ihdr.push_back(1);  // bit depth: 1-bit palette
+    ihdr.push_back(3);  // color type: indexed-color
+    ihdr.push_back(0);  // compression method: deflate
+    ihdr.push_back(0);  // filter method
+    ihdr.push_back(0);  // interlace: none
+    AppendPngChunk(png, "IHDR", ihdr);
+
+    // 2-entry Xbox-green/dark palette.
+    const std::vector<uint8_t> plte = {0x10, 0x7C, 0x10, 0x1B, 0x1F, 0x24};
+    AppendPngChunk(png, "PLTE", plte);
+
+    // Raw image scanlines: filter byte (0) + ceil(dim / 8) bytes per row.
+    const size_t row_data_bytes = (static_cast<size_t>(dim) + 7u) / 8u;
+    const size_t raw_size = static_cast<size_t>(dim) * (1u + row_data_bytes);
+    std::vector<uint8_t> raw(raw_size, 0u);
+    for (uint32_t y = 0; y < dim; ++y) {
+        uint8_t* row = raw.data() + static_cast<size_t>(y) * (1u + row_data_bytes);
+        row[0] = 0;  // filter type None
+        const uint8_t pattern = ((y / 8u) & 1u) ? 0xAAu : 0x55u;
+        std::memset(row + 1, pattern, row_data_bytes);
+    }
+
+    // Wrap raw scanlines in valid zlib stored DEFLATE blocks (max 65535 bytes/block).
+    std::vector<uint8_t> zlib_stream;
+    zlib_stream.reserve(raw_size + 64);
+    zlib_stream.push_back(0x78);  // CMF: deflate, 32K window
+    zlib_stream.push_back(0x01);  // FLG: no preset dict, FCHECK valid
+    size_t offset = 0;
+    while (offset < raw_size) {
+        const size_t chunk = std::min<size_t>(65535u, raw_size - offset);
+        const bool is_final = (offset + chunk >= raw_size);
+        zlib_stream.push_back(is_final ? 0x01u : 0x00u);
+        const uint16_t len = static_cast<uint16_t>(chunk);
+        const uint16_t nlen = static_cast<uint16_t>(~len);
+        zlib_stream.push_back(static_cast<uint8_t>(len & 0xFFu));
+        zlib_stream.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
+        zlib_stream.push_back(static_cast<uint8_t>(nlen & 0xFFu));
+        zlib_stream.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFFu));
+        zlib_stream.insert(zlib_stream.end(), raw.begin() + static_cast<std::ptrdiff_t>(offset),
+                           raw.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
+        offset += chunk;
+    }
+    AppendBe32(zlib_stream, Adler32(raw.data(), raw.size()));
+    AppendPngChunk(png, "IDAT", zlib_stream);
+    AppendPngChunk(png, "IEND", {});
+    return png;
+}
+
+std::string MakeSyntheticXstsToken(uint64_t xuid) {
+    char buf[96] = {};
+    std::snprintf(buf, sizeof(buf), "XBL3.0 x=scarlettx;offline_%016llX",
+                  static_cast<unsigned long long>(xuid));
+    return std::string(buf);
+}
+
+std::string MakeSyntheticSignature() {
+    return "SCARLETTX-OFFLINE-SIGNATURE-V1";
+}
+
+std::wstring Utf8AsciiToWide(const std::string& s) {
+    std::wstring w;
+    w.reserve(s.size());
+    for (unsigned char c : s) {
+        w.push_back(static_cast<wchar_t>(c));
+    }
+    return w;
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // XGameSave implementation (real persistent local-disk containers & blobs)
 // ---------------------------------------------------------------------------
@@ -335,6 +475,10 @@ XGameResult XUserAddAsync(XUserAddOptions /*options*/, XAsyncBlock* async) {
             user->gamertag_classic = profile.gamertag;
         }
         RegisterValidHandle(user);
+        {
+            std::lock_guard<std::mutex> lock(g_active_users_mutex);
+            g_active_users.push_back(user);
+        }
         st->result_handle = user;
         CompleteAsyncState(st, XGR_S_OK, sizeof(XUserHandle));
     });
@@ -363,6 +507,7 @@ XGameResult XUserDuplicateHandle(XUserHandle handle, XUserHandle* duplicatedHand
     if (!handle || !duplicatedHandle) {
         return XGR_E_INVALIDARG;
     }
+    std::lock_guard<std::mutex> lock(g_active_users_mutex);
     handle->ref_count.fetch_add(1, std::memory_order_relaxed);
     *duplicatedHandle = handle;
     return XGR_S_OK;
@@ -372,10 +517,40 @@ void XUserCloseHandle(XUserHandle user) {
     if (!user) {
         return;
     }
-    if (user->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    bool destroy = false;
+    {
+        std::lock_guard<std::mutex> lock(g_active_users_mutex);
+        if (user->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            auto it = std::find(g_active_users.begin(), g_active_users.end(), user);
+            if (it != g_active_users.end()) {
+                g_active_users.erase(it);
+            }
+            destroy = true;
+        }
+    }
+    if (destroy) {
         UnregisterValidHandle(user);
         delete user;
     }
+}
+
+int32_t XUserCompare(XUserHandle user1, XUserHandle user2) {
+    if (user1 == user2) {
+        return 0;
+    }
+    if (!user1) {
+        return -1;
+    }
+    if (!user2) {
+        return 1;
+    }
+    if (user1->xuid != user2->xuid) {
+        return user1->xuid < user2->xuid ? -1 : 1;
+    }
+    if (user1->local_id != user2->local_id) {
+        return user1->local_id < user2->local_id ? -1 : 1;
+    }
+    return 0;
 }
 
 XGameResult XUserGetId(XUserHandle user, uint64_t* userId) {
@@ -386,12 +561,50 @@ XGameResult XUserGetId(XUserHandle user, uint64_t* userId) {
     return XGR_S_OK;
 }
 
+XGameResult XUserFindUserById(uint64_t userId, XUserHandle* handle) {
+    if (!handle) {
+        return XGR_E_POINTER;
+    }
+    *handle = nullptr;
+    if (userId == 0) {
+        return XGR_E_INVALIDARG;
+    }
+    std::lock_guard<std::mutex> lock(g_active_users_mutex);
+    for (XUser* u : g_active_users) {
+        if (u && u->xuid == userId && u->ref_count.load(std::memory_order_acquire) > 0) {
+            u->ref_count.fetch_add(1, std::memory_order_relaxed);
+            *handle = u;
+            return XGR_S_OK;
+        }
+    }
+    return XGR_E_NOTFOUND;
+}
+
 XGameResult XUserGetLocalId(XUserHandle user, XUserLocalId* userLocalId) {
     if (!user || !userLocalId) {
         return XGR_E_INVALIDARG;
     }
     userLocalId->value = user->local_id;
     return XGR_S_OK;
+}
+
+XGameResult XUserFindUserByLocalId(XUserLocalId userLocalId, XUserHandle* handle) {
+    if (!handle) {
+        return XGR_E_POINTER;
+    }
+    *handle = nullptr;
+    if (userLocalId.value == 0) {
+        return XGR_E_INVALIDARG;
+    }
+    std::lock_guard<std::mutex> lock(g_active_users_mutex);
+    for (XUser* u : g_active_users) {
+        if (u && u->local_id == userLocalId.value && u->ref_count.load(std::memory_order_acquire) > 0) {
+            u->ref_count.fetch_add(1, std::memory_order_relaxed);
+            *handle = u;
+            return XGR_S_OK;
+        }
+    }
+    return XGR_E_NOTFOUND;
 }
 
 XGameResult XUserGetGamertag(
@@ -421,6 +634,61 @@ XGameResult XUserGetGamertag(
             return XGR_E_INVALIDARG;
     }
     return CopyStringToBuffer(*src, gamertagSize, gamertag, gamertagUsed);
+}
+
+XGameResult XUserGetGamerPictureAsync(
+    XUserHandle user,
+    XUserGamerPictureSize pictureSize,
+    XAsyncBlock* async) {
+    if (!user || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    if (static_cast<uint32_t>(pictureSize) > static_cast<uint32_t>(XUserGamerPictureSize_ExtraLarge)) {
+        return XGR_E_INVALIDARG;
+    }
+    return BeginAsyncOperation(async, [pictureSize](XAsyncState* st) {
+        std::vector<uint8_t> png = BuildSyntheticGamerPicturePng(pictureSize);
+        const size_t png_size = png.size();
+        st->result_payload = std::move(png);
+        CompleteAsyncState(st, XGR_S_OK, png_size);
+    });
+}
+
+XGameResult XUserGetGamerPictureResultSize(XAsyncBlock* async, size_t* bufferSize) {
+    if (!async || !bufferSize) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetResultSize(async, bufferSize);
+}
+
+XGameResult XUserGetGamerPictureResult(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    size_t* bufferUsed) {
+    if (!async || !buffer) {
+        return XGR_E_INVALIDARG;
+    }
+    XGameResult hr = XAsyncGetStatus(async, true);
+    if (hr != XGR_S_OK) {
+        return hr;
+    }
+    auto state = GetAsyncState(async);
+    if (!state) {
+        return XGR_E_INVALIDARG;
+    }
+    const size_t required = state->result_payload.size();
+    if (bufferUsed) {
+        *bufferUsed = required;
+    }
+    if (bufferSize < required) {
+        return XGR_E_NOT_SUFFICIENT_BUFFER;
+    }
+    if (required > 0) {
+        std::memcpy(buffer, state->result_payload.data(), required);
+    }
+    xgr::ReleaseHleAsyncResult(async);
+    return XGR_S_OK;
 }
 
 XGameResult XUserGetState(XUserHandle user, XUserState* state) {
@@ -469,6 +737,321 @@ XGameResult XUserCheckPrivilege(
         *reason = XUserPrivilegeDenyReason_None;
     }
     return XGR_S_OK;
+}
+
+XGameResult XUserResolvePrivilegeWithUiAsync(
+    XUserHandle user,
+    XUserPrivilegeOptions /*options*/,
+    XUserPrivilege /*privilege*/,
+    XAsyncBlock* async) {
+    if (!user || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    return BeginAsyncOperation(async, [](XAsyncState* st) {
+        CompleteAsyncState(st, XGR_S_OK, 0);
+    });
+}
+
+XGameResult XUserResolvePrivilegeWithUiResult(XAsyncBlock* async) {
+    if (!async) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetStatus(async, true);
+}
+
+XGameResult XUserGetTokenAndSignatureAsync(
+    XUserHandle user,
+    XUserGetTokenAndSignatureOptions options,
+    const char* method,
+    const char* url,
+    size_t headerCount,
+    const XUserGetTokenAndSignatureHttpHeader* headers,
+    size_t bodySize,
+    const void* bodyBuffer,
+    XAsyncBlock* async) {
+    const bool all_users = (options & XUserGetTokenAndSignatureOptions_AllUsers) != 0;
+    if ((!user && !all_users) || !method || !*method || !url || !*url || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    if ((headerCount > 0 && !headers) || (bodySize > 0 && !bodyBuffer)) {
+        return XGR_E_INVALIDARG;
+    }
+    const uint64_t xuid = user ? user->xuid : 0x00090000005CA001ull;
+    return BeginAsyncOperation(async, [xuid](XAsyncState* st) {
+        const std::string tok = MakeSyntheticXstsToken(xuid);
+        const std::string sig = MakeSyntheticSignature();
+        const size_t tok_bytes = tok.size() + 1;
+        const size_t sig_bytes = sig.size() + 1;
+
+        // Pack: [size_t tok_bytes][size_t sig_bytes][tok + '\0'][sig + '\0']
+        std::vector<uint8_t> packed;
+        packed.reserve(sizeof(size_t) * 2 + tok_bytes + sig_bytes);
+        auto append = [&](const void* src, size_t n) {
+            const auto* p = static_cast<const uint8_t*>(src);
+            packed.insert(packed.end(), p, p + n);
+        };
+        append(&tok_bytes, sizeof(tok_bytes));
+        append(&sig_bytes, sizeof(sig_bytes));
+        append(tok.c_str(), tok_bytes);
+        append(sig.c_str(), sig_bytes);
+
+        st->result_payload = std::move(packed);
+        const size_t required = sizeof(XUserGetTokenAndSignatureData) + tok_bytes + sig_bytes;
+        CompleteAsyncState(st, XGR_S_OK, required);
+    });
+}
+
+XGameResult XUserGetTokenAndSignatureResultSize(XAsyncBlock* async, size_t* bufferSize) {
+    if (!async || !bufferSize) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetResultSize(async, bufferSize);
+}
+
+XGameResult XUserGetTokenAndSignatureResult(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    XUserGetTokenAndSignatureData** ptrToBuffer,
+    size_t* bufferUsed) {
+    if (!async || !buffer || !ptrToBuffer) {
+        return XGR_E_INVALIDARG;
+    }
+    XGameResult hr = XAsyncGetStatus(async, true);
+    if (hr != XGR_S_OK) {
+        *ptrToBuffer = nullptr;
+        return hr;
+    }
+    auto state = GetAsyncState(async);
+    if (!state || state->result_payload.size() < sizeof(size_t) * 2) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_FAIL;
+    }
+    const size_t required = state->result_size;
+    if (bufferUsed) {
+        *bufferUsed = required;
+    }
+    if (bufferSize < required) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_NOT_SUFFICIENT_BUFFER;
+    }
+
+    size_t tok_bytes = 0;
+    size_t sig_bytes = 0;
+    std::memcpy(&tok_bytes, state->result_payload.data(), sizeof(tok_bytes));
+    std::memcpy(&sig_bytes, state->result_payload.data() + sizeof(tok_bytes), sizeof(sig_bytes));
+    if (sizeof(size_t) * 2 + tok_bytes + sig_bytes > state->result_payload.size()) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_FAIL;
+    }
+
+    auto* out_bytes = static_cast<uint8_t*>(buffer);
+    auto* data = reinterpret_cast<XUserGetTokenAndSignatureData*>(out_bytes);
+    char* tok_dst = reinterpret_cast<char*>(out_bytes + sizeof(XUserGetTokenAndSignatureData));
+    char* sig_dst = tok_dst + tok_bytes;
+
+    std::memcpy(tok_dst, state->result_payload.data() + sizeof(size_t) * 2, tok_bytes);
+    std::memcpy(sig_dst, state->result_payload.data() + sizeof(size_t) * 2 + tok_bytes, sig_bytes);
+
+    data->tokenSize = tok_bytes;
+    data->signatureSize = sig_bytes;
+    data->token = tok_dst;
+    data->signature = sig_dst;
+    *ptrToBuffer = data;
+
+    xgr::ReleaseHleAsyncResult(async);
+    return XGR_S_OK;
+}
+
+XGameResult XUserGetTokenAndSignatureUtf16Async(
+    XUserHandle user,
+    XUserGetTokenAndSignatureOptions options,
+    const wchar_t* method,
+    const wchar_t* url,
+    size_t headerCount,
+    const XUserGetTokenAndSignatureUtf16HttpHeader* headers,
+    size_t bodySize,
+    const void* bodyBuffer,
+    XAsyncBlock* async) {
+    const bool all_users = (options & XUserGetTokenAndSignatureOptions_AllUsers) != 0;
+    if ((!user && !all_users) || !method || !*method || !url || !*url || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    if ((headerCount > 0 && !headers) || (bodySize > 0 && !bodyBuffer)) {
+        return XGR_E_INVALIDARG;
+    }
+    const uint64_t xuid = user ? user->xuid : 0x00090000005CA001ull;
+    return BeginAsyncOperation(async, [xuid](XAsyncState* st) {
+        const std::wstring tok = Utf8AsciiToWide(MakeSyntheticXstsToken(xuid));
+        const std::wstring sig = Utf8AsciiToWide(MakeSyntheticSignature());
+        const size_t tok_count = tok.size() + 1;
+        const size_t sig_count = sig.size() + 1;
+        const size_t tok_bytes = tok_count * sizeof(wchar_t);
+        const size_t sig_bytes = sig_count * sizeof(wchar_t);
+
+        std::vector<uint8_t> packed;
+        packed.reserve(sizeof(size_t) * 2 + tok_bytes + sig_bytes);
+        auto append = [&](const void* src, size_t n) {
+            const auto* p = static_cast<const uint8_t*>(src);
+            packed.insert(packed.end(), p, p + n);
+        };
+        append(&tok_count, sizeof(tok_count));
+        append(&sig_count, sizeof(sig_count));
+        append(tok.c_str(), tok_bytes);
+        append(sig.c_str(), sig_bytes);
+
+        st->result_payload = std::move(packed);
+        const size_t required = sizeof(XUserGetTokenAndSignatureUtf16Data) + tok_bytes + sig_bytes;
+        CompleteAsyncState(st, XGR_S_OK, required);
+    });
+}
+
+XGameResult XUserGetTokenAndSignatureUtf16ResultSize(XAsyncBlock* async, size_t* bufferSize) {
+    if (!async || !bufferSize) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetResultSize(async, bufferSize);
+}
+
+XGameResult XUserGetTokenAndSignatureUtf16Result(
+    XAsyncBlock* async,
+    size_t bufferSize,
+    void* buffer,
+    XUserGetTokenAndSignatureUtf16Data** ptrToBuffer,
+    size_t* bufferUsed) {
+    if (!async || !buffer || !ptrToBuffer) {
+        return XGR_E_INVALIDARG;
+    }
+    XGameResult hr = XAsyncGetStatus(async, true);
+    if (hr != XGR_S_OK) {
+        *ptrToBuffer = nullptr;
+        return hr;
+    }
+    auto state = GetAsyncState(async);
+    if (!state || state->result_payload.size() < sizeof(size_t) * 2) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_FAIL;
+    }
+    const size_t required = state->result_size;
+    if (bufferUsed) {
+        *bufferUsed = required;
+    }
+    if (bufferSize < required) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_NOT_SUFFICIENT_BUFFER;
+    }
+
+    size_t tok_count = 0;
+    size_t sig_count = 0;
+    std::memcpy(&tok_count, state->result_payload.data(), sizeof(tok_count));
+    std::memcpy(&sig_count, state->result_payload.data() + sizeof(tok_count), sizeof(sig_count));
+    const size_t tok_bytes = tok_count * sizeof(wchar_t);
+    const size_t sig_bytes = sig_count * sizeof(wchar_t);
+    if (sizeof(size_t) * 2 + tok_bytes + sig_bytes > state->result_payload.size()) {
+        *ptrToBuffer = nullptr;
+        return XGR_E_FAIL;
+    }
+
+    auto* out_bytes = static_cast<uint8_t*>(buffer);
+    auto* data = reinterpret_cast<XUserGetTokenAndSignatureUtf16Data*>(out_bytes);
+    auto* tok_dst = reinterpret_cast<wchar_t*>(out_bytes + sizeof(XUserGetTokenAndSignatureUtf16Data));
+    auto* sig_dst = tok_dst + tok_count;
+
+    std::memcpy(tok_dst, state->result_payload.data() + sizeof(size_t) * 2, tok_bytes);
+    std::memcpy(sig_dst, state->result_payload.data() + sizeof(size_t) * 2 + tok_bytes, sig_bytes);
+
+    data->tokenCount = tok_count;
+    data->signatureCount = sig_count;
+    data->token = tok_dst;
+    data->signature = sig_dst;
+    *ptrToBuffer = data;
+
+    xgr::ReleaseHleAsyncResult(async);
+    return XGR_S_OK;
+}
+
+XGameResult XUserResolveIssueWithUiAsync(
+    XUserHandle user,
+    const char* /*url*/,
+    XAsyncBlock* async) {
+    if (!user || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    return BeginAsyncOperation(async, [](XAsyncState* st) {
+        CompleteAsyncState(st, XGR_S_OK, 0);
+    });
+}
+
+XGameResult XUserResolveIssueWithUiResult(XAsyncBlock* async) {
+    if (!async) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetStatus(async, true);
+}
+
+XGameResult XUserResolveIssueWithUiUtf16Async(
+    XUserHandle user,
+    const wchar_t* /*url*/,
+    XAsyncBlock* async) {
+    if (!user || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    return BeginAsyncOperation(async, [](XAsyncState* st) {
+        CompleteAsyncState(st, XGR_S_OK, 0);
+    });
+}
+
+XGameResult XUserResolveIssueWithUiUtf16Result(XAsyncBlock* async) {
+    if (!async) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetStatus(async, true);
+}
+
+XGameResult XUserRegisterForChangeEvent(
+    XTaskQueueHandle /*queue*/,
+    void* /*context*/,
+    XUserChangeEventCallback* callback,
+    XTaskQueueRegistrationToken* token) {
+    if (!callback || !token) {
+        return XGR_E_INVALIDARG;
+    }
+    std::lock_guard<std::mutex> lock(g_user_change_mutex);
+    const uint64_t id = ++g_user_change_next_token;
+    g_user_change_tokens.insert(id);
+    token->token = id;
+    return XGR_S_OK;
+}
+
+bool XUserUnregisterForChangeEvent(XTaskQueueRegistrationToken token, bool /*wait*/) {
+    if (token.token == 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_user_change_mutex);
+    return g_user_change_tokens.erase(token.token) > 0;
+}
+
+XGameResult XUserGetSignOutDeferral(XUserSignOutDeferralHandle* deferral) {
+    if (!deferral) {
+        return XGR_E_POINTER;
+    }
+    auto* d = new (std::nothrow) XUserSignOutDeferral();
+    if (!d) {
+        *deferral = nullptr;
+        return XGR_E_OUTOFMEMORY;
+    }
+    d->id = g_signout_deferral_next_id.fetch_add(1, std::memory_order_relaxed);
+    RegisterValidHandle(d);
+    *deferral = d;
+    return XGR_S_OK;
+}
+
+void XUserCloseSignOutDeferralHandle(XUserSignOutDeferralHandle deferral) {
+    if (!deferral) {
+        return;
+    }
+    UnregisterValidHandle(deferral);
+    delete deferral;
 }
 
 XGameResult XUserGetDefaultXuid(uint64_t* out_xuid) {

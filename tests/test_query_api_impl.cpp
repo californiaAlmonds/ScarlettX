@@ -344,10 +344,64 @@ int main() {
         CHECK(LoadVtableSlot<FnCompare>(xuser, 0x28)(xuser, user, nullptr) != 0);
         LoadVtableSlot<FnClose>(xuser, 0x20)(xuser, same);
 
-        // XUserFindUserById is in the table but not implemented.
-        CHECK(LoadVtableSlot<FnOther>(xuser, 0x60)(xuser, 0, 0, 0) == static_cast<XGameResult>(0x80004001u));
+        // Slots 10 (0x50) and 12 (0x60): XUserFindUserByLocalId & XUserFindUserById.
+        using FnFindByLocalId = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XUserLocalId, void**);
+        using FnFindById = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, uint64_t, void**);
+        void* by_local = nullptr;
+        CHECK(LoadVtableSlot<FnFindByLocalId>(xuser, 0x50)(xuser, XUserLocalId{local_id}, &by_local) == XGR_S_OK);
+        CHECK(by_local != nullptr && LoadVtableSlot<FnCompare>(xuser, 0x28)(xuser, user, by_local) == 0);
+        LoadVtableSlot<FnClose>(xuser, 0x20)(xuser, by_local);
+
+        void* by_id = nullptr;
+        CHECK(LoadVtableSlot<FnFindById>(xuser, 0x60)(xuser, xuid, &by_id) == XGR_S_OK);
+        CHECK(by_id != nullptr && LoadVtableSlot<FnCompare>(xuser, 0x28)(xuser, user, by_id) == 0);
+        LoadVtableSlot<FnClose>(xuser, 0x20)(xuser, by_id);
+        CHECK(LoadVtableSlot<FnFindById>(xuser, 0x60)(xuser, 0xDEADBEEFull, &by_id) == XGR_E_NOTFOUND);
+
+        // Slots 16-18 (0x80-0x90): XUserGetGamerPictureAsync / ResultSize / Result.
+        using FnPicAsync = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, void*, uint32_t, XAsyncBlock*);
+        using FnSizeResult = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XAsyncBlock*, size_t*);
+        using FnPicResult = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XAsyncBlock*, size_t, void*, size_t*);
+        XAsyncBlock pic{};
+        CHECK(LoadVtableSlot<FnPicAsync>(xuser, 0x80)(xuser, user, 0u, &pic) == XGR_S_OK);
+        CHECK(XAsyncGetStatus(&pic, true) == XGR_S_OK);
+        size_t pic_sz = 0;
+        CHECK(LoadVtableSlot<FnSizeResult>(xuser, 0x88)(xuser, &pic, &pic_sz) == XGR_S_OK && pic_sz > 32);
+        uint8_t pic_buf[1024] = {};
+        size_t pic_used = 0;
+        CHECK(pic_sz <= sizeof(pic_buf));
+        CHECK(LoadVtableSlot<FnPicResult>(xuser, 0x90)(xuser, &pic, sizeof(pic_buf), pic_buf, &pic_used) == XGR_S_OK);
+        CHECK(pic_used == pic_sz && pic_buf[0] == 0x89 && pic_buf[1] == 'P');
+
+        // Slots 23-25 (0xB8-0xC8): XUserGetTokenAndSignatureAsync / ResultSize / Result.
+        using FnTokAsync = XGameResult (SCARLETTX_GDK_CALLBACK*)(
+            void*, void*, uint32_t, const char*, const char*, size_t, const void*, size_t, const void*, XAsyncBlock*);
+        using FnTokResult = XGameResult (SCARLETTX_GDK_CALLBACK*)(
+            void*, XAsyncBlock*, size_t, void*, XUserGetTokenAndSignatureData**, size_t*);
+        XAsyncBlock tok{};
+        CHECK(LoadVtableSlot<FnTokAsync>(xuser, 0xB8)(xuser, user, 0u, "GET", "https://example.invalid", 0, nullptr, 0,
+                                                      nullptr, &tok) == XGR_S_OK);
+        CHECK(XAsyncGetStatus(&tok, true) == XGR_S_OK);
+        size_t tok_sz = 0;
+        CHECK(LoadVtableSlot<FnSizeResult>(xuser, 0xC0)(xuser, &tok, &tok_sz) == XGR_S_OK && tok_sz > 0);
+        alignas(XUserGetTokenAndSignatureData) uint8_t tok_buf[512] = {};
+        XUserGetTokenAndSignatureData* tok_data = nullptr;
+        size_t tok_used = 0;
+        CHECK(tok_sz <= sizeof(tok_buf));
+        CHECK(LoadVtableSlot<FnTokResult>(xuser, 0xC8)(xuser, &tok, sizeof(tok_buf), tok_buf, &tok_data, &tok_used) ==
+              XGR_S_OK);
+        CHECK(tok_data != nullptr && tok_data->token != nullptr && tok_data->signature != nullptr);
+
+        // Slots 35-36 (0x118-0x120): XUserGetSignOutDeferral / Close.
+        using FnGetDeferral = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XUserSignOutDeferralHandle*);
+        using FnCloseDeferral = void (SCARLETTX_GDK_CALLBACK*)(void*, XUserSignOutDeferralHandle);
+        XUserSignOutDeferralHandle deferral = nullptr;
+        CHECK(LoadVtableSlot<FnGetDeferral>(xuser, 0x118)(xuser, &deferral) == XGR_S_OK && deferral != nullptr);
+        LoadVtableSlot<FnCloseDeferral>(xuser, 0x120)(xuser, deferral);
+        (void)sizeof(FnOther);
 
         CHECK(LoadVtableSlot<FnUnregister>(xuser, 0x110)(xuser, token, true));
+        CHECK(!LoadVtableSlot<FnUnregister>(xuser, 0x110)(xuser, token, true));
         CHECK(!LoadVtableSlot<FnUnregister>(xuser, 0x110)(xuser, 0, true));
         LoadVtableSlot<FnClose>(xuser, 0x20)(xuser, user);
         CHECK(LoadVtableSlot<FnRelease>(xuser, 0x10)(xuser) == 0u);

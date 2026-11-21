@@ -183,15 +183,7 @@ XGameResult SCARLETTX_GDK_CALLBACK UserDuplicateHandle(void*, XUserHandle user, 
 void SCARLETTX_GDK_CALLBACK UserCloseHandle(void*, XUserHandle user) { XUserCloseHandle(user); }
 
 // Zero when both handles refer to the same user.
-int32_t SCARLETTX_GDK_CALLBACK UserCompare(void*, XUserHandle a, XUserHandle b) {
-    if (a == b) return 0;
-    uint64_t id_a = 0;
-    uint64_t id_b = 0;
-    const bool has_a = a && XUserGetId(a, &id_a) == XGR_S_OK;
-    const bool has_b = b && XUserGetId(b, &id_b) == XGR_S_OK;
-    if (has_a != has_b) return has_a ? 1 : -1;
-    return id_a == id_b ? 0 : (id_a < id_b ? -1 : 1);
-}
+int32_t SCARLETTX_GDK_CALLBACK UserCompare(void*, XUserHandle a, XUserHandle b) { return XUserCompare(a, b); }
 
 XGameResult SCARLETTX_GDK_CALLBACK UserGetMaxUsers(void*, uint32_t* max_users) { return XUserGetMaxUsers(max_users); }
 
@@ -217,7 +209,15 @@ XGameResult SCARLETTX_GDK_CALLBACK UserGetLocalId(void*, XUserHandle user, XUser
     return XUserGetLocalId(user, local_id);
 }
 
+XGameResult SCARLETTX_GDK_CALLBACK UserFindUserByLocalId(void*, XUserLocalId local_id, XUserHandle* user) {
+    return XUserFindUserByLocalId(local_id, user);
+}
+
 XGameResult SCARLETTX_GDK_CALLBACK UserGetId(void*, XUserHandle user, uint64_t* id) { return XUserGetId(user, id); }
+
+XGameResult SCARLETTX_GDK_CALLBACK UserFindUserById(void*, uint64_t id, XUserHandle* user) {
+    return XUserFindUserById(id, user);
+}
 
 XGameResult SCARLETTX_GDK_CALLBACK UserGetIsGuest(void*, XUserHandle user, bool* is_guest) {
     return XUserGetIsGuest(user, is_guest);
@@ -245,6 +245,20 @@ XGameResult SCARLETTX_GDK_CALLBACK UserGetGamertag(void* self, XUserHandle user,
     return UserGetGamertagComponent(self, user, 0, size, gamertag, used);
 }
 
+XGameResult SCARLETTX_GDK_CALLBACK UserGetGamerPictureAsync(void*, XUserHandle user,
+                                                            XUserGamerPictureSize picture_size, XAsyncBlock* async) {
+    return XUserGetGamerPictureAsync(user, picture_size, async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetGamerPictureResultSize(void*, XAsyncBlock* async, size_t* buffer_size) {
+    return XUserGetGamerPictureResultSize(async, buffer_size);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetGamerPictureResult(void*, XAsyncBlock* async, size_t buffer_size,
+                                                             void* buffer, size_t* buffer_used) {
+    return XUserGetGamerPictureResult(async, buffer_size, buffer, buffer_used);
+}
+
 XGameResult SCARLETTX_GDK_CALLBACK UserGetAgeGroup(void*, XUserHandle user, XUserAgeGroup* age_group) {
     return XUserGetAgeGroup(user, age_group);
 }
@@ -255,23 +269,88 @@ XGameResult SCARLETTX_GDK_CALLBACK UserCheckPrivilege(void*, XUserHandle user, X
     return XUserCheckPrivilege(user, options, privilege, has_privilege, reason);
 }
 
-// The signed-in user never changes in the HLE, so registrations only hand
-// out a token; the callback is never invoked.
-std::atomic<uint64_t> g_user_change_tokens{0};
-
-XGameResult SCARLETTX_GDK_CALLBACK UserRegisterForChangeEvent(void*, XTaskQueueHandle /*queue*/, void* /*context*/,
-                                                              void* callback, XTaskQueueRegistrationToken* token) {
-    if (!callback || !token) return XGR_E_INVALIDARG;
-    std::memset(token, 0, sizeof(*token));
-    const uint64_t id = g_user_change_tokens.fetch_add(1, std::memory_order_relaxed) + 1;
-    std::memcpy(token, &id, sizeof(id) < sizeof(*token) ? sizeof(id) : sizeof(*token));
-    return XGR_S_OK;
+XGameResult SCARLETTX_GDK_CALLBACK UserResolvePrivilegeWithUiAsync(void*, XUserHandle user,
+                                                                   XUserPrivilegeOptions options,
+                                                                   XUserPrivilege privilege, XAsyncBlock* async) {
+    return XUserResolvePrivilegeWithUiAsync(user, options, privilege, async);
 }
 
-bool SCARLETTX_GDK_CALLBACK UserUnregisterForChangeEvent(void*, XTaskQueueRegistrationToken token, bool /*wait*/) {
-    uint64_t id = 0;
-    std::memcpy(&id, &token, sizeof(id) < sizeof(token) ? sizeof(id) : sizeof(token));
-    return id != 0 && id <= g_user_change_tokens.load(std::memory_order_relaxed);
+XGameResult SCARLETTX_GDK_CALLBACK UserResolvePrivilegeWithUiResult(void*, XAsyncBlock* async) {
+    return XUserResolvePrivilegeWithUiResult(async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureAsync(
+    void*, XUserHandle user, XUserGetTokenAndSignatureOptions options, const char* method, const char* url,
+    size_t header_count, const XUserGetTokenAndSignatureHttpHeader* headers, size_t body_size, const void* body_buffer,
+    XAsyncBlock* async) {
+    return XUserGetTokenAndSignatureAsync(user, options, method, url, header_count, headers, body_size, body_buffer,
+                                          async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureResultSize(void*, XAsyncBlock* async, size_t* buffer_size) {
+    return XUserGetTokenAndSignatureResultSize(async, buffer_size);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureResult(void*, XAsyncBlock* async, size_t buffer_size,
+                                                                  void* buffer,
+                                                                  XUserGetTokenAndSignatureData** ptr_to_buffer,
+                                                                  size_t* buffer_used) {
+    return XUserGetTokenAndSignatureResult(async, buffer_size, buffer, ptr_to_buffer, buffer_used);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureUtf16Async(
+    void*, XUserHandle user, XUserGetTokenAndSignatureOptions options, const wchar_t* method, const wchar_t* url,
+    size_t header_count, const XUserGetTokenAndSignatureUtf16HttpHeader* headers, size_t body_size,
+    const void* body_buffer, XAsyncBlock* async) {
+    return XUserGetTokenAndSignatureUtf16Async(user, options, method, url, header_count, headers, body_size,
+                                               body_buffer, async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureUtf16ResultSize(void*, XAsyncBlock* async,
+                                                                           size_t* buffer_size) {
+    return XUserGetTokenAndSignatureUtf16ResultSize(async, buffer_size);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetTokenAndSignatureUtf16Result(
+    void*, XAsyncBlock* async, size_t buffer_size, void* buffer,
+    XUserGetTokenAndSignatureUtf16Data** ptr_to_buffer, size_t* buffer_used) {
+    return XUserGetTokenAndSignatureUtf16Result(async, buffer_size, buffer, ptr_to_buffer, buffer_used);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserResolveIssueWithUiAsync(void*, XUserHandle user, const char* url,
+                                                               XAsyncBlock* async) {
+    return XUserResolveIssueWithUiAsync(user, url, async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserResolveIssueWithUiResult(void*, XAsyncBlock* async) {
+    return XUserResolveIssueWithUiResult(async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserResolveIssueWithUiUtf16Async(void*, XUserHandle user, const wchar_t* url,
+                                                                    XAsyncBlock* async) {
+    return XUserResolveIssueWithUiUtf16Async(user, url, async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserResolveIssueWithUiUtf16Result(void*, XAsyncBlock* async) {
+    return XUserResolveIssueWithUiUtf16Result(async);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserRegisterForChangeEvent(void*, XTaskQueueHandle queue, void* context,
+                                                              XUserChangeEventCallback* callback,
+                                                              XTaskQueueRegistrationToken* token) {
+    return XUserRegisterForChangeEvent(queue, context, callback, token);
+}
+
+bool SCARLETTX_GDK_CALLBACK UserUnregisterForChangeEvent(void*, XTaskQueueRegistrationToken token, bool wait) {
+    return XUserUnregisterForChangeEvent(token, wait);
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK UserGetSignOutDeferral(void*, XUserSignOutDeferralHandle* deferral) {
+    return XUserGetSignOutDeferral(deferral);
+}
+
+void SCARLETTX_GDK_CALLBACK UserCloseSignOutDeferralHandle(void*, XUserSignOutDeferralHandle deferral) {
+    XUserCloseSignOutDeferralHandle(deferral);
 }
 
 template <size_t... I>
@@ -287,14 +366,33 @@ std::array<Slot, kUserSlots> MakeUserVtbl(std::index_sequence<I...>) {
     vtbl[7] = reinterpret_cast<Slot>(&UserAddAsync);
     vtbl[8] = reinterpret_cast<Slot>(&UserAddResult);
     vtbl[9] = reinterpret_cast<Slot>(&UserGetLocalId);
+    vtbl[10] = reinterpret_cast<Slot>(&UserFindUserByLocalId);
     vtbl[11] = reinterpret_cast<Slot>(&UserGetId);
+    vtbl[12] = reinterpret_cast<Slot>(&UserFindUserById);
     vtbl[13] = reinterpret_cast<Slot>(&UserGetIsGuest);
     vtbl[14] = reinterpret_cast<Slot>(&UserGetState);
     vtbl[15] = reinterpret_cast<Slot>(&UserGetGamertag);
+    vtbl[16] = reinterpret_cast<Slot>(&UserGetGamerPictureAsync);
+    vtbl[17] = reinterpret_cast<Slot>(&UserGetGamerPictureResultSize);
+    vtbl[18] = reinterpret_cast<Slot>(&UserGetGamerPictureResult);
     vtbl[19] = reinterpret_cast<Slot>(&UserGetAgeGroup);
     vtbl[20] = reinterpret_cast<Slot>(&UserCheckPrivilege);
+    vtbl[21] = reinterpret_cast<Slot>(&UserResolvePrivilegeWithUiAsync);
+    vtbl[22] = reinterpret_cast<Slot>(&UserResolvePrivilegeWithUiResult);
+    vtbl[23] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureAsync);
+    vtbl[24] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureResultSize);
+    vtbl[25] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureResult);
+    vtbl[26] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureUtf16Async);
+    vtbl[27] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureUtf16ResultSize);
+    vtbl[28] = reinterpret_cast<Slot>(&UserGetTokenAndSignatureUtf16Result);
+    vtbl[29] = reinterpret_cast<Slot>(&UserResolveIssueWithUiAsync);
+    vtbl[30] = reinterpret_cast<Slot>(&UserResolveIssueWithUiResult);
+    vtbl[31] = reinterpret_cast<Slot>(&UserResolveIssueWithUiUtf16Async);
+    vtbl[32] = reinterpret_cast<Slot>(&UserResolveIssueWithUiUtf16Result);
     vtbl[33] = reinterpret_cast<Slot>(&UserRegisterForChangeEvent);
     vtbl[34] = reinterpret_cast<Slot>(&UserUnregisterForChangeEvent);
+    vtbl[35] = reinterpret_cast<Slot>(&UserGetSignOutDeferral);
+    vtbl[36] = reinterpret_cast<Slot>(&UserCloseSignOutDeferralHandle);
     return vtbl;
 }
 const std::array<Slot, kUserSlots> kUserVtbl = MakeUserVtbl(std::make_index_sequence<kUserSlots>{});
