@@ -119,6 +119,19 @@ int main() {
     SX_REQUIRE(SendMessageTimeoutA(hwnd, WM_SYSCOMMAND, SC_KEYMENU, 0, SMTO_ABORTIFHUNG, 10000, &result) != 0);
     SX_REQUIRE(!InMenuMode(window_thread));
 
+    // Alt+Enter covers the monitor without a frame, and a second one undoes it.
+    const LPARAM alt_enter = 1 << 29;
+    SX_REQUIRE(SendMessageTimeoutA(hwnd, WM_SYSKEYDOWN, VK_RETURN, alt_enter, SMTO_ABORTIFHUNG, 10000, &result) != 0);
+    MONITORINFO mi = {sizeof(mi)};
+    RECT rc = {};
+    SX_REQUIRE(GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi) && GetWindowRect(hwnd, &rc));
+    SX_REQUIRE(EqualRect(&rc, &mi.rcMonitor));
+    SX_REQUIRE((GetWindowLongPtrA(hwnd, GWL_STYLE) & WS_CAPTION) == 0);
+    SX_REQUIRE(Call(queue, kQueuePresentX, uintptr_t{1}, plane, static_cast<void*>(nullptr)) == 0);
+    SX_REQUIRE(SendMessageTimeoutA(hwnd, WM_SYSKEYDOWN, VK_RETURN, alt_enter, SMTO_ABORTIFHUNG, 10000, &result) != 0);
+    SX_REQUIRE(GetWindowRect(hwnd, &rc) && !EqualRect(&rc, &mi.rcMonitor));
+    SX_REQUIRE((GetWindowLongPtrA(hwnd, GWL_STYLE) & WS_CAPTION) != 0);
+
     // Closing the window is not a way to take the output away from the title.
     SX_REQUIRE(SendMessageTimeoutA(hwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 10000, &result) != 0);
     SX_REQUIRE(IsWindow(hwnd));
