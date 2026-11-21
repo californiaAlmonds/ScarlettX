@@ -18,9 +18,34 @@ extern "C" {
 #endif
 
 typedef void CURL;
+typedef void CURLM;
 typedef int32_t CURLcode;
+typedef int32_t CURLMcode;
 typedef int32_t CURLoption;
 typedef int32_t CURLINFO;
+
+enum {
+    CURLM_OK = 0,
+    CURLM_BAD_HANDLE = 1,
+    CURLM_BAD_EASY_HANDLE = 2,
+    CURLM_OUT_OF_MEMORY = 3,
+    CURLM_INTERNAL_ERROR = 4,
+    CURLM_ADDED_ALREADY = 7
+};
+
+enum {
+    CURLMSG_NONE = 0,
+    CURLMSG_DONE = 1
+};
+
+typedef struct CURLMsg {
+    int32_t msg;
+    CURL* easy_handle;
+    union {
+        void* whatever;
+        CURLcode result;
+    } data;
+} CURLMsg;
 
 typedef struct curl_slist {
     char* data;
@@ -65,15 +90,31 @@ enum {
 SCARLETTX_XCURL_API CURLcode curl_global_init(int64_t flags);
 SCARLETTX_XCURL_API void curl_global_cleanup(void);
 SCARLETTX_XCURL_API CURL* curl_easy_init(void);
+SCARLETTX_XCURL_API CURL* curl_easy_duphandle(CURL* curl);
 SCARLETTX_XCURL_API void curl_easy_cleanup(CURL* curl);
 SCARLETTX_XCURL_API void curl_easy_reset(CURL* curl);
 SCARLETTX_XCURL_API CURLcode curl_easy_setopt(CURL* curl, CURLoption option, ...);
 SCARLETTX_XCURL_API CURLcode curl_easy_perform(CURL* curl);
 SCARLETTX_XCURL_API CURLcode curl_easy_getinfo(CURL* curl, CURLINFO info, ...);
 SCARLETTX_XCURL_API const char* curl_easy_strerror(CURLcode code);
+SCARLETTX_XCURL_API char* curl_easy_escape(CURL* curl, const char* string, int32_t length);
+SCARLETTX_XCURL_API char* curl_easy_unescape(
+    CURL* curl,
+    const char* string,
+    int32_t length,
+    int32_t* outlength);
+SCARLETTX_XCURL_API void curl_free(void* p);
 SCARLETTX_XCURL_API curl_slist* curl_slist_append(curl_slist* list, const char* string);
 SCARLETTX_XCURL_API void curl_slist_free_all(curl_slist* list);
 SCARLETTX_XCURL_API const char* curl_version(void);
+
+// Multi-handle async transfer interface (libcurl / XCurl standard ABI)
+SCARLETTX_XCURL_API CURLM* curl_multi_init(void);
+SCARLETTX_XCURL_API CURLMcode curl_multi_cleanup(CURLM* multi_handle);
+SCARLETTX_XCURL_API CURLMcode curl_multi_add_handle(CURLM* multi_handle, CURL* easy_handle);
+SCARLETTX_XCURL_API CURLMcode curl_multi_remove_handle(CURLM* multi_handle, CURL* easy_handle);
+SCARLETTX_XCURL_API CURLMcode curl_multi_perform(CURLM* multi_handle, int32_t* running_handles);
+SCARLETTX_XCURL_API CURLMsg* curl_multi_info_read(CURLM* multi_handle, int32_t* msgs_in_queue);
 
 // Deterministic offline mock registration for ScarlettX tests & offline play
 SCARLETTX_XCURL_API CURLcode xcurl_register_mock_response(

@@ -144,6 +144,9 @@ int main() {
     {
         SX_CHECK(HCInitialize(nullptr) == SX_S_OK);
         SX_CHECK(HCIsInitialized() == 1);
+        SX_CHECK(HCSettingsSetTraceLevel(3u) == SX_S_OK);
+        uint32_t trace_lvl = 0;
+        SX_CHECK(HCSettingsGetTraceLevel(&trace_lvl) == SX_S_OK && trace_lvl == 3u);
         const char* hc_ver = nullptr;
         SX_CHECK(HCGetLibVersion(&hc_ver) == SX_S_OK && hc_ver != nullptr);
 
@@ -157,8 +160,12 @@ int main() {
 
         HCCallHandle call = nullptr;
         SX_CHECK(HCHttpCallCreate(&call) == SX_S_OK);
+        HCCallHandle dup = HCHttpCallDuplicateHandle(call);
+        SX_CHECK(dup == call);
         SX_CHECK(HCHttpCallRequestSetUrl(call, "GET", "https://title.mgt.xboxlive.com/config") == SX_S_OK);
         SX_CHECK(HCHttpCallRequestSetHeader(call, "Accept", "application/json", 1) == SX_S_OK);
+        SX_CHECK(HCHttpCallRequestSetRequestBodyString(call, "{\"ping\":1}") == SX_S_OK);
+        SX_CHECK(HCHttpCallRequestSetRetryAllowed(call, 0u) == SX_S_OK);
 
         bool completed = false;
         XAsyncBlock async{};
@@ -178,6 +185,15 @@ int main() {
         const char* ct = nullptr;
         SX_CHECK(HCHttpCallResponseGetHeader(call, "Content-Type", &ct) == SX_S_OK);
         SX_CHECK(ct && std::string(ct) == "application/json");
+        uint32_t hdr_count = 0;
+        SX_CHECK(HCHttpCallResponseGetNumHeaders(call, &hdr_count) == SX_S_OK && hdr_count >= 2u);
+        const char* hname = nullptr;
+        const char* hval = nullptr;
+        SX_CHECK(HCHttpCallResponseGetHeaderAtIndex(call, 0, &hname, &hval) == SX_S_OK);
+        SX_CHECK(hname && hval && std::string(hname) == "Content-Type");
+        SX_CHECK(HCHttpCallCloseHandle(dup) == SX_S_OK);
+        // Original handle must still remain alive until its own CloseHandle.
+        SX_CHECK(HCHttpCallResponseGetStatusCode(call, &status) == SX_S_OK && status == 200);
         SX_CHECK(HCHttpCallCloseHandle(call) == SX_S_OK);
         HCCleanup();
     }
@@ -209,6 +225,33 @@ int main() {
         SX_CHECK(code == 200);
         SX_CHECK(body_out == payload);
         SX_CHECK(dl == static_cast<int64_t>(payload.size()));
+
+        // curl_easy_escape / unescape / duphandle & curl_multi_*
+        char* escaped = curl_easy_escape(curl, "hello world/1+2", 0);
+        SX_CHECK(escaped != nullptr && std::string(escaped) == "hello%20world%2F1%2B2");
+        int32_t unesc_len = 0;
+        char* unescaped = curl_easy_unescape(curl, escaped, 0, &unesc_len);
+        SX_CHECK(unescaped != nullptr && unesc_len == 15 && std::string(unescaped) == "hello world/1+2");
+        curl_free(escaped);
+        curl_free(unescaped);
+
+        CURL* dup_curl = curl_easy_duphandle(curl);
+        SX_CHECK(dup_curl != nullptr && dup_curl != curl);
+        std::string multi_out;
+        SX_CHECK(curl_easy_setopt(dup_curl, CURLOPT_WRITEDATA, &multi_out) == CURLE_OK);
+        CURLM* multi = curl_multi_init();
+        SX_CHECK(multi != nullptr);
+        SX_CHECK(curl_multi_add_handle(multi, dup_curl) == CURLM_OK);
+        int32_t running = -1;
+        SX_CHECK(curl_multi_perform(multi, &running) == CURLM_OK && running == 0);
+        int32_t queued = -1;
+        CURLMsg* msg = curl_multi_info_read(multi, &queued);
+        SX_CHECK(msg != nullptr && msg->msg == CURLMSG_DONE && msg->easy_handle == dup_curl &&
+                 msg->data.result == CURLE_OK && queued == 0);
+        SX_CHECK(multi_out == payload);
+        SX_CHECK(curl_multi_remove_handle(multi, dup_curl) == CURLM_OK);
+        SX_CHECK(curl_multi_cleanup(multi) == CURLM_OK);
+        curl_easy_cleanup(dup_curl);
 
         curl_slist_free_all(hdrs);
         curl_easy_cleanup(curl);

@@ -33,8 +33,11 @@ SCARLETTX_HC_API SX_HRESULT HCInitialize(void* args);
 SCARLETTX_HC_API void HCCleanup(void);
 SCARLETTX_HC_API uint32_t HCIsInitialized(void);
 SCARLETTX_HC_API SX_HRESULT HCGetLibVersion(const char** version);
+SCARLETTX_HC_API SX_HRESULT HCSettingsSetTraceLevel(uint32_t trace_level);
+SCARLETTX_HC_API SX_HRESULT HCSettingsGetTraceLevel(uint32_t* trace_level);
 
 SCARLETTX_HC_API SX_HRESULT HCHttpCallCreate(HCCallHandle* call);
+SCARLETTX_HC_API HCCallHandle HCHttpCallDuplicateHandle(HCCallHandle call);
 SCARLETTX_HC_API SX_HRESULT HCHttpCallCloseHandle(HCCallHandle call);
 SCARLETTX_HC_API SX_HRESULT HCHttpCallRequestSetUrl(
     HCCallHandle call,
@@ -49,9 +52,15 @@ SCARLETTX_HC_API SX_HRESULT HCHttpCallRequestSetRequestBodyBytes(
     HCCallHandle call,
     const uint8_t* request_body_bytes,
     uint32_t request_body_size);
+SCARLETTX_HC_API SX_HRESULT HCHttpCallRequestSetRequestBodyString(
+    HCCallHandle call,
+    const char* request_body_string);
 SCARLETTX_HC_API SX_HRESULT HCHttpCallRequestSetTimeout(
     HCCallHandle call,
     uint32_t timeout_in_seconds);
+SCARLETTX_HC_API SX_HRESULT HCHttpCallRequestSetRetryAllowed(
+    HCCallHandle call,
+    uint32_t retry_allowed);
 
 // Executes the HTTP call (against registered mocks or offline synthetic handler)
 // and completes the provided XAsyncBlock (if non-null).
@@ -80,6 +89,14 @@ SCARLETTX_HC_API SX_HRESULT HCHttpCallResponseGetResponseBodyBytes(
 SCARLETTX_HC_API SX_HRESULT HCHttpCallResponseGetHeader(
     HCCallHandle call,
     const char* header_name,
+    const char** header_value);
+SCARLETTX_HC_API SX_HRESULT HCHttpCallResponseGetNumHeaders(
+    HCCallHandle call,
+    uint32_t* num_headers);
+SCARLETTX_HC_API SX_HRESULT HCHttpCallResponseGetHeaderAtIndex(
+    HCCallHandle call,
+    uint32_t header_index,
+    const char** header_name,
     const char** header_value);
 
 // Deterministic offline mock registration for ScarlettX tests & offline play

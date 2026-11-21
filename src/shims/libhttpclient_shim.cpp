@@ -10,18 +10,20 @@
 #include <vector>
 
 struct HC_CALL {
+    uint32_t ref_count = 1;
     std::string method = "GET";
     std::string url;
     std::unordered_map<std::string, std::string> req_headers;
     std::vector<uint8_t> req_body;
     uint32_t timeout_seconds = 30;
+    uint32_t retry_allowed = 1;
 
     uint32_t status_code = 0;
     SX_HRESULT network_error = SX_S_OK;
     uint32_t platform_error = 0;
     std::vector<uint8_t> resp_body;
     std::string resp_string;
-    std::unordered_map<std::string, std::string> resp_headers;
+    std::vector<std::pair<std::string, std::string>> resp_headers;
 };
 
 namespace {
@@ -36,8 +38,19 @@ struct HttpMockRule {
 
 std::mutex g_mutex;
 bool g_initialized = false;
+uint32_t g_trace_level = 0;
 std::unordered_map<HC_CALL*, std::unique_ptr<HC_CALL>> g_calls;
 std::vector<HttpMockRule> g_mocks;
+
+void SetRespHeader(HC_CALL& call, const std::string& name, const std::string& value) {
+    for (auto& kv : call.resp_headers) {
+        if (kv.first == name) {
+            kv.second = value;
+            return;
+        }
+    }
+    call.resp_headers.emplace_back(name, value);
+}
 
 }  // namespace
 
@@ -67,6 +80,19 @@ SX_HRESULT HCGetLibVersion(const char** version) {
     return SX_S_OK;
 }
 
+SX_HRESULT HCSettingsSetTraceLevel(uint32_t trace_level) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_trace_level = trace_level;
+    return SX_S_OK;
+}
+
+SX_HRESULT HCSettingsGetTraceLevel(uint32_t* trace_level) {
+    if (!trace_level) return SX_E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    *trace_level = g_trace_level;
+    return SX_S_OK;
+}
+
 SX_HRESULT HCHttpCallCreate(HCCallHandle* call) {
     if (!call) return SX_E_INVALIDARG;
     *call = nullptr;
@@ -78,10 +104,24 @@ SX_HRESULT HCHttpCallCreate(HCCallHandle* call) {
     return SX_S_OK;
 }
 
+HCCallHandle HCHttpCallDuplicateHandle(HCCallHandle call) {
+    if (!call) return nullptr;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_calls.find(call);
+    if (it == g_calls.end()) return nullptr;
+    ++it->second->ref_count;
+    return call;
+}
+
 SX_HRESULT HCHttpCallCloseHandle(HCCallHandle call) {
     if (!call) return SX_E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_mutex);
-    return g_calls.erase(call) > 0 ? SX_S_OK : SX_E_INVALIDARG;
+    auto it = g_calls.find(call);
+    if (it == g_calls.end()) return SX_E_INVALIDARG;
+    if (--it->second->ref_count == 0) {
+        g_calls.erase(it);
+    }
+    return SX_S_OK;
 }
 
 SX_HRESULT HCHttpCallRequestSetUrl(HCCallHandle call, const char* method, const char* url) {
@@ -117,11 +157,30 @@ SX_HRESULT HCHttpCallRequestSetRequestBodyBytes(
     return SX_S_OK;
 }
 
+SX_HRESULT HCHttpCallRequestSetRequestBodyString(
+    HCCallHandle call,
+    const char* request_body_string) {
+    if (!call || !request_body_string) return SX_E_INVALIDARG;
+    const size_t len = std::strlen(request_body_string);
+    return HCHttpCallRequestSetRequestBodyBytes(
+        call,
+        reinterpret_cast<const uint8_t*>(request_body_string),
+        static_cast<uint32_t>(len));
+}
+
 SX_HRESULT HCHttpCallRequestSetTimeout(HCCallHandle call, uint32_t timeout_in_seconds) {
     if (!call) return SX_E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
     call->timeout_seconds = timeout_in_seconds;
+    return SX_S_OK;
+}
+
+SX_HRESULT HCHttpCallRequestSetRetryAllowed(HCCallHandle call, uint32_t retry_allowed) {
+    if (!call) return SX_E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
+    call->retry_allowed = retry_allowed ? 1u : 0u;
     return SX_S_OK;
 }
 
@@ -131,6 +190,7 @@ SX_HRESULT HCHttpCallPerformAsync(HCCallHandle call, XAsyncBlock* async_block) {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
 
+        call->resp_headers.clear();
         bool matched = false;
         for (const auto& rule : g_mocks) {
             const bool method_ok = rule.method.empty() || rule.method == "*" || rule.method == call->method;
@@ -142,8 +202,8 @@ SX_HRESULT HCHttpCallPerformAsync(HCCallHandle call, XAsyncBlock* async_block) {
                 call->resp_body = rule.body;
                 call->resp_string.assign(
                     reinterpret_cast<const char*>(rule.body.data()), rule.body.size());
-                call->resp_headers["Content-Type"] = rule.content_type;
-                call->resp_headers["X-ScarlettX-Offline"] = "1";
+                SetRespHeader(*call, "Content-Type", rule.content_type);
+                SetRespHeader(*call, "X-ScarlettX-Offline", "1");
                 matched = true;
                 break;
             }
@@ -156,8 +216,8 @@ SX_HRESULT HCHttpCallPerformAsync(HCCallHandle call, XAsyncBlock* async_block) {
             call->platform_error = 0;
             call->resp_string = fallback;
             call->resp_body.assign(fallback.begin(), fallback.end());
-            call->resp_headers["Content-Type"] = "application/json";
-            call->resp_headers["X-ScarlettX-Offline"] = "1";
+            SetRespHeader(*call, "Content-Type", "application/json");
+            SetRespHeader(*call, "X-ScarlettX-Offline", "1");
         }
     }
 
@@ -232,8 +292,35 @@ SX_HRESULT HCHttpCallResponseGetHeader(
     if (!call || !header_name || !header_value) return SX_E_INVALIDARG;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
-    auto it = call->resp_headers.find(header_name);
-    *header_value = (it != call->resp_headers.end()) ? it->second.c_str() : nullptr;
+    *header_value = nullptr;
+    for (const auto& kv : call->resp_headers) {
+        if (kv.first == header_name) {
+            *header_value = kv.second.c_str();
+            break;
+        }
+    }
+    return SX_S_OK;
+}
+
+SX_HRESULT HCHttpCallResponseGetNumHeaders(HCCallHandle call, uint32_t* num_headers) {
+    if (!call || !num_headers) return SX_E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
+    *num_headers = static_cast<uint32_t>(call->resp_headers.size());
+    return SX_S_OK;
+}
+
+SX_HRESULT HCHttpCallResponseGetHeaderAtIndex(
+    HCCallHandle call,
+    uint32_t header_index,
+    const char** header_name,
+    const char** header_value) {
+    if (!call || !header_name || !header_value) return SX_E_INVALIDARG;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_calls.find(call) == g_calls.end()) return SX_E_INVALIDARG;
+    if (header_index >= call->resp_headers.size()) return SX_E_INVALIDARG;
+    *header_name = call->resp_headers[header_index].first.c_str();
+    *header_value = call->resp_headers[header_index].second.c_str();
     return SX_S_OK;
 }
 

@@ -1,9 +1,12 @@
 #define SCARLETTX_BUILDING_XCURL 1
 #include "scarlettx/net/xcurl_abi.h"
 
+#include <algorithm>
 #include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,10 +35,30 @@ struct XCurlMockRule {
     std::vector<uint8_t> body;
 };
 
+struct XCurlMultiHandle {
+    std::vector<CURL*> attached;
+    std::vector<CURL*> pending;
+    std::deque<CURLMsg> completed;
+    CURLMsg last_returned{};
+};
+
 std::mutex g_mutex;
 bool g_global_inited = false;
 std::unordered_map<void*, std::unique_ptr<XCurlEasyHandle>> g_handles;
+std::unordered_map<void*, std::unique_ptr<XCurlMultiHandle>> g_multi_handles;
 std::vector<XCurlMockRule> g_mocks;
+
+bool IsUnreservedUriChar(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+int HexDigitValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
 
 }  // namespace
 
@@ -50,6 +73,7 @@ CURLcode curl_global_init(int64_t flags) {
 
 void curl_global_cleanup(void) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_multi_handles.clear();
     g_handles.clear();
     g_global_inited = false;
 }
@@ -59,6 +83,17 @@ CURL* curl_easy_init(void) {
     auto h = std::make_unique<XCurlEasyHandle>();
     void* raw = h.get();
     g_handles[raw] = std::move(h);
+    return raw;
+}
+
+CURL* curl_easy_duphandle(CURL* curl) {
+    if (!curl) return nullptr;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_handles.find(curl);
+    if (it == g_handles.end()) return nullptr;
+    auto copy = std::make_unique<XCurlEasyHandle>(*it->second);
+    void* raw = copy.get();
+    g_handles[raw] = std::move(copy);
     return raw;
 }
 
@@ -268,6 +303,155 @@ void curl_slist_free_all(curl_slist* list) {
 
 const char* curl_version(void) {
     return "ScarlettX-XCurl/8.0.0-HLE";
+}
+
+char* curl_easy_escape(CURL* /*curl*/, const char* string, int32_t length) {
+    if (!string) return nullptr;
+    const size_t in_len = (length > 0) ? static_cast<size_t>(length) : std::strlen(string);
+    std::string out;
+    out.reserve(in_len * 3u);
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < in_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(string[i]);
+        if (IsUnreservedUriChar(c)) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0Fu]);
+            out.push_back(kHex[c & 0x0Fu]);
+        }
+    }
+    char* buf = static_cast<char*>(std::malloc(out.size() + 1u));
+    if (!buf) return nullptr;
+    std::memcpy(buf, out.data(), out.size());
+    buf[out.size()] = '\0';
+    return buf;
+}
+
+char* curl_easy_unescape(CURL* /*curl*/, const char* string, int32_t length, int32_t* outlength) {
+    if (!string) return nullptr;
+    const size_t in_len = (length > 0) ? static_cast<size_t>(length) : std::strlen(string);
+    std::string out;
+    out.reserve(in_len);
+    for (size_t i = 0; i < in_len; ++i) {
+        if (string[i] == '%' && i + 2u < in_len) {
+            const int hi = HexDigitValue(string[i + 1u]);
+            const int lo = HexDigitValue(string[i + 2u]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2u;
+                continue;
+            }
+        }
+        out.push_back(string[i]);
+    }
+    if (outlength) {
+        *outlength = static_cast<int32_t>(out.size());
+    }
+    char* buf = static_cast<char*>(std::malloc(out.size() + 1u));
+    if (!buf) return nullptr;
+    std::memcpy(buf, out.data(), out.size());
+    buf[out.size()] = '\0';
+    return buf;
+}
+
+void curl_free(void* p) {
+    std::free(p);
+}
+
+CURLM* curl_multi_init(void) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto mh = std::make_unique<XCurlMultiHandle>();
+    void* raw = mh.get();
+    g_multi_handles[raw] = std::move(mh);
+    return raw;
+}
+
+CURLMcode curl_multi_cleanup(CURLM* multi_handle) {
+    if (!multi_handle) return CURLM_BAD_HANDLE;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_multi_handles.erase(multi_handle) > 0 ? CURLM_OK : CURLM_BAD_HANDLE;
+}
+
+CURLMcode curl_multi_add_handle(CURLM* multi_handle, CURL* easy_handle) {
+    if (!multi_handle) return CURLM_BAD_HANDLE;
+    if (!easy_handle) return CURLM_BAD_EASY_HANDLE;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto mit = g_multi_handles.find(multi_handle);
+    if (mit == g_multi_handles.end()) return CURLM_BAD_HANDLE;
+    if (g_handles.find(easy_handle) == g_handles.end()) return CURLM_BAD_EASY_HANDLE;
+    auto& mh = *mit->second;
+    if (std::find(mh.attached.begin(), mh.attached.end(), easy_handle) != mh.attached.end()) {
+        return CURLM_ADDED_ALREADY;
+    }
+    mh.attached.push_back(easy_handle);
+    mh.pending.push_back(easy_handle);
+    return CURLM_OK;
+}
+
+CURLMcode curl_multi_remove_handle(CURLM* multi_handle, CURL* easy_handle) {
+    if (!multi_handle) return CURLM_BAD_HANDLE;
+    if (!easy_handle) return CURLM_BAD_EASY_HANDLE;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto mit = g_multi_handles.find(multi_handle);
+    if (mit == g_multi_handles.end()) return CURLM_BAD_HANDLE;
+    auto& mh = *mit->second;
+    auto it = std::find(mh.attached.begin(), mh.attached.end(), easy_handle);
+    if (it == mh.attached.end()) return CURLM_BAD_EASY_HANDLE;
+    mh.attached.erase(it);
+    mh.pending.erase(std::remove(mh.pending.begin(), mh.pending.end(), easy_handle), mh.pending.end());
+    return CURLM_OK;
+}
+
+CURLMcode curl_multi_perform(CURLM* multi_handle, int32_t* running_handles) {
+    if (!multi_handle) return CURLM_BAD_HANDLE;
+    std::vector<CURL*> to_run;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto mit = g_multi_handles.find(multi_handle);
+        if (mit == g_multi_handles.end()) return CURLM_BAD_HANDLE;
+        to_run.swap(mit->second->pending);
+    }
+
+    std::vector<CURLMsg> finished;
+    finished.reserve(to_run.size());
+    for (CURL* easy : to_run) {
+        CURLMsg msg{};
+        msg.msg = CURLMSG_DONE;
+        msg.easy_handle = easy;
+        msg.data.result = curl_easy_perform(easy);
+        finished.push_back(msg);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto mit = g_multi_handles.find(multi_handle);
+        if (mit == g_multi_handles.end()) return CURLM_BAD_HANDLE;
+        for (const auto& m : finished) {
+            mit->second->completed.push_back(m);
+        }
+        if (running_handles) {
+            *running_handles = static_cast<int32_t>(mit->second->pending.size());
+        }
+    }
+    return CURLM_OK;
+}
+
+CURLMsg* curl_multi_info_read(CURLM* multi_handle, int32_t* msgs_in_queue) {
+    if (msgs_in_queue) *msgs_in_queue = 0;
+    if (!multi_handle) return nullptr;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto mit = g_multi_handles.find(multi_handle);
+    if (mit == g_multi_handles.end() || mit->second->completed.empty()) {
+        return nullptr;
+    }
+    auto& mh = *mit->second;
+    mh.last_returned = mh.completed.front();
+    mh.completed.pop_front();
+    if (msgs_in_queue) {
+        *msgs_in_queue = static_cast<int32_t>(mh.completed.size());
+    }
+    return &mh.last_returned;
 }
 
 CURLcode xcurl_register_mock_response(
