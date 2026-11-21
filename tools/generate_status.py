@@ -182,8 +182,8 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
     xa_cnt = (
         count_exported_symbols(xa_hdr, "SCARLETTX_XAUDIO2_API", "XAudio2")
         + count_exported_symbols(xa_hdr, "SCARLETTX_XAUDIO2_API", "Xma2")
-        + count_exported_symbols(acp_hdr, "SCARLETTX_ACPHAL_API", "Apu")
-        + count_exported_symbols(acp_hdr, "SCARLETTX_ACPHAL_API", "AcpHal")
+        + count_exported_symbols(acp_hdr, "SCARLETTX_ACP_API", "Apu")
+        + count_exported_symbols(acp_hdr, "SCARLETTX_ACP_API", "AcpHal")
     )
     gi_cnt = count_exported_symbols(gi_hdr, "SCARLETTX_GAMEINPUT_API", "GameInput")
     bink_cnt = count_exported_symbols(bink_hdr, "SCARLETTX_BINK2_API", "Bink")
