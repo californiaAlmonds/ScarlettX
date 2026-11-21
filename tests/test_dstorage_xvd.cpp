@@ -72,6 +72,30 @@ int main() {
         SX_CHECK(enc_xvd.Header().is_encrypted);
         std::vector<uint8_t> denied;
         SX_CHECK(!enc_xvd.ReadUserData(0, 64, denied).ok());
+
+        // A user-data range that wraps or runs past the image must be rejected
+        const uint64_t wrap_offset = 0xFFFFFFFFFFFFF000ull;
+        const uint64_t wrap_length = 0x2000;
+        auto wrap_bytes = unenc_bytes;
+        std::memcpy(wrap_bytes.data() + 0x250, &wrap_offset, sizeof(wrap_offset));
+        std::memcpy(wrap_bytes.data() + 0x258, &wrap_length, sizeof(wrap_length));
+        scarlettx::XvdContainer wrap_xvd;
+        SX_CHECK(!wrap_xvd.OpenBytes(wrap_bytes).ok());
+
+        const uint64_t long_length = payload.size() + 1;
+        auto long_bytes = unenc_bytes;
+        std::memcpy(long_bytes.data() + 0x258, &long_length, sizeof(long_length));
+        scarlettx::XvdContainer long_xvd;
+        SX_CHECK(!long_xvd.OpenBytes(long_bytes).ok());
+
+        const auto long_path = (tmp_dir / "long_user_data.xvd").string();
+        {
+            std::ofstream ofs(long_path, std::ios::binary);
+            SX_CHECK(ofs.good());
+            ofs.write(reinterpret_cast<const char*>(long_bytes.data()), static_cast<std::streamsize>(long_bytes.size()));
+        }
+        scarlettx::XvdContainer long_file_xvd;
+        SX_CHECK(!long_file_xvd.OpenFile(long_path).ok());
     }
 
     // 2. DirectStorage configuration, factory, queue, status array

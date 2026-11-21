@@ -56,7 +56,7 @@ public:
         bool mark_encrypted = false);
 
 private:
-    Status ParseHeaderFromBytes(const uint8_t* data, size_t size);
+    Status ParseHeaderFromBytes(const uint8_t* data, size_t size, uint64_t backing_size);
 
     std::string path_;
     std::vector<uint8_t> backing_bytes_;

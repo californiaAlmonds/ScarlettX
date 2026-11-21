@@ -44,7 +44,7 @@ constexpr size_t kOffUserDataLength = 0x258;
 
 }  // namespace
 
-Status XvdContainer::ParseHeaderFromBytes(const uint8_t* data, size_t size) {
+Status XvdContainer::ParseHeaderFromBytes(const uint8_t* data, size_t size, uint64_t backing_size) {
     header_ = {};
     if (!data || size < kMinHeaderSize) {
         return Status::Error(StatusCode::UnsupportedFormat, "XVD image smaller than 4 KiB header");
@@ -70,6 +70,11 @@ Status XvdContainer::ParseHeaderFromBytes(const uint8_t* data, size_t size) {
     if (header_.user_data_length == 0 && header_.drive_size > header_.user_data_offset) {
         header_.user_data_length = header_.drive_size - header_.user_data_offset;
     }
+    if (header_.user_data_offset > backing_size ||
+        header_.user_data_length > backing_size - header_.user_data_offset) {
+        header_ = {};
+        return Status::Error(StatusCode::UnsupportedFormat, "XVD user-data range exceeds image size");
+    }
 
     header_.is_encrypted = (header_.volume_flags & kFlagEncryptionDisabled) == 0;
     header_.has_data_integrity = (header_.volume_flags & kFlagDataIntegrityDisabled) == 0;
@@ -88,8 +93,13 @@ Status XvdContainer::OpenFile(const std::string& path) {
     if (static_cast<size_t>(ifs.gcount()) < kMinHeaderSize) {
         return Status::Error(StatusCode::UnsupportedFormat, "Truncated XVD header: " + path);
     }
+    ifs.seekg(0, std::ios::end);
+    const auto end_pos = ifs.tellg();
+    if (end_pos < 0) {
+        return Status::Error(StatusCode::IoError, "Failed to query XVD file size: " + path);
+    }
 
-    Status st = ParseHeaderFromBytes(hdr.data(), hdr.size());
+    Status st = ParseHeaderFromBytes(hdr.data(), hdr.size(), static_cast<uint64_t>(end_pos));
     if (!st.ok()) {
         return st;
     }
@@ -101,7 +111,7 @@ Status XvdContainer::OpenFile(const std::string& path) {
 }
 
 Status XvdContainer::OpenBytes(std::vector<uint8_t> data) {
-    Status st = ParseHeaderFromBytes(data.data(), data.size());
+    Status st = ParseHeaderFromBytes(data.data(), data.size(), data.size());
     if (!st.ok()) {
         return st;
     }
@@ -134,7 +144,7 @@ Status XvdContainer::ReadUserData(
     }
 
     if (memory_backed_) {
-        if (abs_offset + size > backing_bytes_.size()) {
+        if (abs_offset > backing_bytes_.size() || size > backing_bytes_.size() - abs_offset) {
             return Status::Error(StatusCode::IoError, "In-memory XVD buffer truncated");
         }
         std::memcpy(out_data.data(), backing_bytes_.data() + abs_offset, static_cast<size_t>(size));
