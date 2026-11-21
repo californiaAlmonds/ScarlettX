@@ -748,6 +748,7 @@ struct GuestTextureMemory {
     void* base = nullptr;
     size_t size = 0;
     XG_RESOURCE_LAYOUT layout{};
+    uint64_t hot_until = ~0ull;  // last frame epoch in which every submit checks it
 };
 std::mutex g_guest_textures_mutex;
 std::vector<XboxD3D12ResourceProxy*> g_guest_textures;
@@ -1025,8 +1026,9 @@ void UploadGuestTextureBatch(ID3D12CommandQueue* queue,
     device->Release();
 }
 
-// Uploads every guest-memory texture the title has written to since the last call.
-void FlushGuestTextureWrites(ID3D12CommandQueue* queue) {
+// Uploads the guest-memory textures the title has written to since the last call.
+// Without `all` only textures created or written within the last frame are checked.
+void FlushGuestTextureWrites(ID3D12CommandQueue* queue, uint64_t epoch, bool all) {
     std::lock_guard<std::mutex> lock(g_guest_textures_mutex);
     if (g_guest_textures.empty() || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
     std::vector<GuestTextureUpload> uploads;
@@ -1034,14 +1036,16 @@ void FlushGuestTextureWrites(ID3D12CommandQueue* queue) {
     std::vector<UINT> dirty;
     for (XboxD3D12ResourceProxy* tex : g_guest_textures) {
         GuestTextureMemory& mem = *tex->guest_memory;
+        if (!all && epoch > mem.hot_until) continue;
         pages.resize(mem.size / 4096 + 1);
         ULONG_PTR count = pages.size();
         DWORD granularity = 0;
         // Reading resets the watch: a write that lands during the copy is picked up next time.
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, mem.base, mem.size, pages.data(), &count, &granularity) != 0 ||
-            count == 0) {
+        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, mem.base, mem.size, pages.data(), &count, &granularity) != 0) {
             continue;
         }
+        if (count != 0 || mem.hot_until == ~0ull) mem.hot_until = epoch + 1;
+        if (count == 0) continue;
         pages.resize(count);
         // Only the subresources the title wrote to: the others may hold data
         // that arrived through command-list copies.
@@ -2154,19 +2158,20 @@ intptr_t SCARLETTX_GDK_CALLBACK QueueProxyExecuteCommandLists(
             std::cerr << "[ScarlettX][d3d12_xs] Queue::ExecuteCommandLists(q=" << self
                       << ", count=" << pc_lists.size() << ")\n";
         }
-        // Flush dirty guest textures once per presented frame, before the first
-        // submit of the frame. Every-submit flushing rescanned every texture
-        // for every command list the title queued.
+        // Every guest texture is scanned once per presented frame, before the
+        // frame's first submit; scanning all of them on every submit was too
+        // slow. Later submits only check textures written within the last frame.
         const uint64_t epoch = g_frame_epoch.load(std::memory_order_relaxed);
-        if (g_flushed_epoch.load(std::memory_order_relaxed) != epoch) {
-            LARGE_INTEGER freq{}, start{}, end{};
-            QueryPerformanceFrequency(&freq);
-            QueryPerformanceCounter(&start);
-            FlushGuestTextureWrites(obj->pc_queue);
-            QueryPerformanceCounter(&end);
-            g_flush_us.fetch_add(static_cast<uint64_t>(
-                                     (end.QuadPart - start.QuadPart) * 1000000ll / freq.QuadPart),
-                                 std::memory_order_relaxed);
+        const bool all = g_flushed_epoch.load(std::memory_order_relaxed) != epoch;
+        LARGE_INTEGER freq{}, start{}, end{};
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+        FlushGuestTextureWrites(obj->pc_queue, epoch, all);
+        QueryPerformanceCounter(&end);
+        g_flush_us.fetch_add(static_cast<uint64_t>(
+                                 (end.QuadPart - start.QuadPart) * 1000000ll / freq.QuadPart),
+                             std::memory_order_relaxed);
+        if (all) {
             g_flush_count.fetch_add(1, std::memory_order_relaxed);
             g_flushed_epoch.store(epoch, std::memory_order_relaxed);
         }
