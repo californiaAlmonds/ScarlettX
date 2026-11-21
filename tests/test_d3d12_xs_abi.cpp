@@ -123,6 +123,15 @@ int main() {
     SX_CHECK(alloc_size >= 1920ull * 1080ull * 4ull);
     SX_CHECK(alloc_align >= 65536ull);
 
+    uint64_t bc_size = 0;
+    uint64_t bc_align = 0;
+    SX_CHECK_EQ(D3D12XboxGetResourceAllocationInfo(dev, 1920, 1080, 71 /* BC1_UNORM */,
+                                                   &bc_size, &bc_align), 0);
+    SX_CHECK(bc_size >= 480ull * 270ull * 8ull);
+    SX_CHECK(bc_size < alloc_size);
+    SX_CHECK(D3D12XboxGetResourceAllocationInfo(dev, 1920, 1080, 0 /* UNKNOWN */,
+                                                &bc_size, &bc_align) != 0);
+
     // Frame interval, schedule frame event, WaitFrameEventXEx, PresentX, stats, Suspend/Resume
     SX_CHECK_EQ(D3D12XboxSetFrameIntervalX(dev, D3D12XBOX_FRAME_INTERVAL_120_HZ, 0), 0);
 

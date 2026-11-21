@@ -4464,7 +4464,15 @@ int32_t D3D12XboxGetResourceAllocationInfo(uint64_t device_handle,
         desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
-        const D3D12_RESOURCE_ALLOCATION_INFO info = dev->GetResourceAllocationInfo(0, 1, &desc);
+        D3D12_RESOURCE_ALLOCATION_INFO info = dev->GetResourceAllocationInfo(0, 1, &desc);
+        if (info.SizeInBytes == UINT64_MAX) {
+            // The host rejects the render-target flag for formats such as BC1.
+            desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+            info = dev->GetResourceAllocationInfo(0, 1, &desc);
+        }
+        if (info.SizeInBytes == UINT64_MAX) {
+            return -1;
+        }
         *out_size_bytes = info.SizeInBytes;
         *out_alignment = info.Alignment;
         return 0;
