@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -221,6 +222,31 @@ int main() {
         std::cerr << "[test_inproc_loader] BootPackage(--in-process) failed: "
                   << boot_st.message << "\n";
         return 1;
+    }
+
+    // 8. An image with stripped relocations must not load away from its preferred base.
+    {
+        const std::filesystem::path fixed_dll =
+            std::filesystem::path(SCARLETTX_BINARY_DIR) / "test_inproc_loader_fixed.dll";
+        std::filesystem::copy_file(probe_dll, fixed_dll,
+                                   std::filesystem::copy_options::overwrite_existing);
+        {
+            std::fstream f(fixed_dll, std::ios::in | std::ios::out | std::ios::binary);
+            IMAGE_DOS_HEADER dos{};
+            IMAGE_NT_HEADERS64 nt{};
+            f.read(reinterpret_cast<char*>(&dos), sizeof(dos));
+            f.seekg(dos.e_lfanew);
+            f.read(reinterpret_cast<char*>(&nt), sizeof(nt));
+            nt.FileHeader.Characteristics |= IMAGE_FILE_RELOCS_STRIPPED;
+            nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC] = {};
+            f.seekp(dos.e_lfanew);
+            f.write(reinterpret_cast<const char*>(&nt), sizeof(nt));
+            SX_REQUIRE(f.good());
+        }
+        scarlettx::MappedPeImage fixed;
+        SX_REQUIRE(!fixed.MapFile(fixed_dll.string(), redirects, hle_reg, opts).ok());
+        SX_REQUIRE(!fixed.IsMapped());
+        std::filesystem::remove(fixed_dll);
     }
 
     std::cout << "[test_inproc_loader] PASSED (relocs=" << mapped.RelocationsApplied()

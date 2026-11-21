@@ -390,6 +390,13 @@ Status MappedPeImage::MapFile(const std::string& pe_path,
         return Status::Error(StatusCode::OutOfMemory, "VirtualAlloc failed for guest PE64 image");
     }
     mapped_base_ = static_cast<uint8_t*>(base);
+    if (WasRelocated() && (nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) != 0) {
+        std::ostringstream msg;
+        msg << "Image with stripped relocations cannot be mapped away from its preferred base 0x"
+            << std::hex << preferred_image_base_;
+        Unmap();
+        return Status::Error(StatusCode::UnsupportedFormat, msg.str());
+    }
 
     // 2. Copy headers and sections.
     const size_t headers_copy =
