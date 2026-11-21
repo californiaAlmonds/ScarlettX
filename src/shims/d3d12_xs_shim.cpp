@@ -1298,9 +1298,12 @@ intptr_t SCARLETTX_GDK_CALLBACK CmdListResourceBarrier(void* self, uintptr_t num
             res_proxy->tracked_state.store(static_cast<uint32_t>(b.Transition.StateAfter), std::memory_order_relaxed);
             if (b.Transition.StateBefore == b.Transition.StateAfter) continue;
             translated.push_back(b);
-        } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV && b.UAV.pResource) {
-            b.UAV.pResource = reinterpret_cast<XboxD3D12ResourceProxy*>(b.UAV.pResource)->pc_res;
-            if (b.UAV.pResource) translated.push_back(b);
+        } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV) {
+            if (b.UAV.pResource) {
+                b.UAV.pResource = reinterpret_cast<XboxD3D12ResourceProxy*>(b.UAV.pResource)->pc_res;
+                if (!b.UAV.pResource) continue;
+            }
+            translated.push_back(b);
         } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
             if (b.Aliasing.pResourceBefore) b.Aliasing.pResourceBefore = reinterpret_cast<XboxD3D12ResourceProxy*>(b.Aliasing.pResourceBefore)->pc_res;
             if (b.Aliasing.pResourceAfter) b.Aliasing.pResourceAfter = reinterpret_cast<XboxD3D12ResourceProxy*>(b.Aliasing.pResourceAfter)->pc_res;
