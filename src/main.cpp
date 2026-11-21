@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -81,11 +82,21 @@ int main(int argc, char** argv) {
             } else if (arg == "--force-relocate") {
                 cfg.force_relocate = true;
             } else if (arg == "--frames" && i + 1 < argc) {
-                cfg.max_frames = static_cast<uint32_t>(std::stoul(argv[++i]));
+                char* end = nullptr;
+                const unsigned long frames = std::strtoul(argv[++i], &end, 10);
+                if (end == argv[i] || *end != '\0') {
+                    std::cerr << "[boot] --frames needs a number, got '" << argv[i] << "'\n";
+                    return 1;
+                }
+                cfg.max_frames = static_cast<uint32_t>(frames);
             } else if (arg == "--rt-dump" && i + 1 < argc) {
                 cfg.rt_dump_path = argv[++i];
             } else if (arg == "--raster-dump" && i + 1 < argc) {
                 cfg.raster_dump_path = argv[++i];
+            } else {
+                std::cerr << "[boot] Unknown or incomplete option: " << arg << "\n";
+                PrintUsage();
+                return 1;
             }
         }
         scarlettx::Emulator emu(cfg);
