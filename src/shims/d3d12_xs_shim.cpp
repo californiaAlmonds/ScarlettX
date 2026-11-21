@@ -2260,7 +2260,7 @@ DWORD WINAPI PresentWindowThread(void* param) {
     RECT rc{0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     const HWND hwnd = CreateWindowExA(
-        0, cls_name, "ScarlettX — Xbox Series X|S",
+        0, cls_name, "ScarlettX - Xbox Series X|S",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, wc.hInstance, nullptr);

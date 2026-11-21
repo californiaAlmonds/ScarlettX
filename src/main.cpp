@@ -9,7 +9,7 @@
 namespace {
 
 void PrintUsage() {
-    std::cout << "ScarlettX — Xbox Series X|S (Scarlett) HLE Emulator\n"
+    std::cout << "ScarlettX - Xbox Series X|S (Scarlett) HLE Emulator\n"
               << "Usage:\n"
               << "  scarlettx inspect <package_dir>\n"
               << "  scarlettx boot <package_dir> [--headless] [--in-process] [--gpu|--warp] [--trace] [--stats] [--uncapped] [--force-relocate] [--frames N] [--rt-dump path.ppm] [--raster-dump path.ppm]\n"
