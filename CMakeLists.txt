@@ -27,6 +27,10 @@ add_library(scarlettx_core STATIC
     src/gpu/xg_layout.cpp
     src/runtime/emulator.cpp
     src/runtime/virtual_drive.cpp
+    src/io/bcpack.cpp
+    src/audio/xma2_decoder.cpp
+    src/middleware/bink2_decoder.cpp
+    src/middleware/ffx_gpu_fsr.cpp
 )
 
 target_include_directories(scarlettx_core PUBLIC
@@ -363,3 +367,5 @@ add_test(
     NAME test_boot_rt_showcase
     COMMAND $<TARGET_FILE:scarlettx> boot "${CMAKE_BINARY_DIR}/packages/rt_showcase" --headless --warp --frames 2 --rt-dump "${CMAKE_BINARY_DIR}/rt_showcase_frame.ppm"
 )
+
+scarlettx_add_test(test_production_codecs tests/test_production_codecs.cpp)
