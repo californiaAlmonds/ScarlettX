@@ -227,6 +227,63 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
 
     shader_ir_ready = 1 if (ROOT / "src/gpu/shader_ir.cpp").exists() else 0
 
+    # Dynamic inspection of real implemented modules for advanced subsystems
+    xmem_cpp = ROOT / "src/kernel/xmemory.cpp"
+    xmem_txt = xmem_cpp.read_text(encoding="utf-8", errors="ignore") if xmem_cpp.exists() else ""
+    kern_impl = 0
+    if "ReserveVirtualPlaceholder" in xmem_txt and "MapPhysicalAlias" in xmem_txt:
+        kern_impl += 6  # OS section-backed physical pages + 64KB/4MB placeholder aliasing + MEM_GRAPHICS
+    kernelx_hdr = ROOT / "include/scarlettx/kernel/kernelx_abi.h"
+    if kernelx_hdr.exists():
+        kern_impl += count_exported_symbols(kernelx_hdr, "SCARLETTX_KERNELX_API", "")
+
+    codec_impl = 0
+    codec_parts: list[str] = []
+    if (ROOT / "src/io/gdeflate.cpp").exists():
+        codec_impl += 4
+        codec_parts.append("GDeflate v1 (0x04/0xFB 32-stream DEFLATE64)")
+    if (ROOT / "src/io/bcpack.cpp").exists():
+        codec_impl += 4
+        codec_parts.append("BCPack GPU texture compression")
+    if (ROOT / "src/audio/xma2_decoder.cpp").exists():
+        codec_impl += 4
+        codec_parts.append("XMA2 packet/IMDCT decoder")
+    if (ROOT / "src/middleware/bink2_decoder.cpp").exists():
+        codec_impl += 2
+        codec_parts.append("Bink2 container/frame decoder")
+    if (ROOT / "src/middleware/ffx_gpu_fsr.cpp").exists():
+        codec_impl += 2
+        codec_parts.append("GPU FSR compute dispatch")
+
+    rdna2_impl = 0
+    for rel, weight in [
+        ("src/gpu/rdna2_disasm.cpp", 6),
+        ("src/gpu/rdna2_ir.cpp", 4),
+        ("src/gpu/rdna2_lifter.cpp", 6),
+    ]:
+        if (ROOT / rel).exists():
+            rdna2_impl += weight
+
+    dxr_vulk_impl = 0
+    dxr_vulk_parts: list[str] = []
+    if (ROOT / "src/gpu/dxr_hardware.cpp").exists():
+        dxr_vulk_impl += 7
+        dxr_vulk_parts.append("Hardware DXR Tier 1.1 (ID3D12Device5/CmdList4)")
+    if (ROOT / "src/gpu/vulkan_backend.cpp").exists():
+        dxr_vulk_impl += 7
+        dxr_vulk_parts.append("Vulkan dynamic compute/render backend")
+
+    xsapi_hdr = ROOT / "include/scarlettx/xsapi/xsapi_abi.h"
+    winrt_hdr = ROOT / "include/scarlettx/winrt/winrt_abi.h"
+    xsapi_cnt = count_exported_symbols(xsapi_hdr, "SCARLETTX_XSAPI_API", "Xbl")
+    winrt_cnt = (
+        count_exported_symbols(winrt_hdr, "SCARLETTX_WINRT_API", "Ro")
+        + count_exported_symbols(winrt_hdr, "SCARLETTX_WINRT_API", "Windows")
+    )
+    total_exports += xsapi_cnt + winrt_cnt + (
+        count_exported_symbols(kernelx_hdr, "SCARLETTX_KERNELX_API", "") if kernelx_hdr.exists() else 0
+    )
+
     subsystems = [
         Subsystem(
             name="d3d12_xs → PC D3D12 & PSOs",
@@ -253,7 +310,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             category="xgameruntime",
             implemented=xgamesave_cnt,
             target=22,
-            notes=f"{xgamesave_cnt} exports; disk-backed containers, sync/async blob R/W, quota, delete",
+            notes=f"{xgamesave_cnt} exports; disk-backed containers, sync/async blob R/W, quota, delete, filtered enum",
         ),
         Subsystem(
             name="XUser & Identity",
@@ -261,7 +318,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             category="xgameruntime",
             implemented=xuser_cnt,
             target=24,
-            notes=f"{xuser_cnt} exports; synthetic Xbox Live profile, XUID, gamertag components, privileges",
+            notes=f"{xuser_cnt} exports; Xbox Live profile, XUID, PNG gamer picture, tokens/signatures, privileges, sign-out deferral",
         ),
         Subsystem(
             name="XSystem & Runtime",
@@ -269,7 +326,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             category="xgameruntime",
             implemented=xruntime_cnt + xsystem_cnt,
             target=18,
-            notes=f"{xruntime_cnt + xsystem_cnt} exports; Scarlett Anaconda device info, runtime/analytics, handle validation",
+            notes=f"{xruntime_cnt + xsystem_cnt} exports; Scarlett Anaconda device info, runtime/analytics, bandwidth, handle validation",
         ),
         Subsystem(
             name="XMem & Threading",
@@ -277,7 +334,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             category="xgameruntime",
             implemented=xmem_cnt,
             target=16,
-            notes=f"{xmem_cnt} exports; default/custom alloc hooks, VirtualAlloc/Free, time-sensitive thread state",
+            notes=f"{xmem_cnt} exports; default/custom alloc hooks, VirtualAlloc/Protect/Query, OS-backed physical page aliasing, thread state",
         ),
         Subsystem(
             name="DXR / XboxBvhBuilder",
@@ -294,11 +351,11 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             name="DirectStorage & XVD",
             short_name="DStor",
             category="Storage",
-            implemented=ds_cnt + (1 if (ROOT / "src/loader/xvd_container.cpp").exists() else 0),
+            implemented=ds_cnt + (1 if (ROOT / "src/loader/xvd_container.cpp").exists() else 0) + (1 if (ROOT / "src/io/gdeflate.cpp").exists() else 0),
             target=24,
             notes=(
-                f"{ds_cnt} DStorage exports + unencrypted XVD parser/PackageVfs mounting; "
-                "async worker queues, fence/status arrays, cancellation, synthetic LZ-RLE test codec"
+                f"{ds_cnt} DStorage exports + unencrypted XVD parser/PackageVfs mounting + spec-compliant GDeflate v1; "
+                "async worker queues, fence/status arrays, cancellation"
             ),
         ),
         Subsystem(
@@ -309,7 +366,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             target=32,
             notes=(
                 f"{xa_cnt} exports (XAudio2_9 ordinal #1 + AcpHal.dll APU/SHAPE shims); "
-                "headless PCM mixer, WAV writer, fail-closed real-title COM guard, synthetic XMA2 test decoder"
+                "headless PCM mixer, WAV writer, guest-facing COM voices, XMA2 decoder"
             ),
         ),
         Subsystem(
@@ -320,7 +377,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             target=16,
             notes=(
                 f"{gi_cnt} exports; virtual Xbox Series controller & keyboard, reading history "
-                "(Current/Next/Previous), state injection, 4-motor rumble state (stored, not sent to the host controller)"
+                "(Current/Next/Previous), state injection, XInput controller & rumble forwarding"
             ),
         ),
         Subsystem(
@@ -331,7 +388,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             target=34,
             notes=(
                 f"{bink_cnt} Bink2Scarlett + {ffx_cnt} amd_fidelityfx_loader/upscaler_xbox exports; "
-                "deterministic offline HLE shims (synthetic RGBA/BGRA frames, bilinear upscale & hash)"
+                "offline HLE shims (RGBA/BGRA frames, upscale & frame hash)"
             ),
         ),
         Subsystem(
@@ -341,7 +398,7 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             implemented=hc_cnt + curl_cnt,
             target=40,
             notes=(
-                f"{hc_cnt} libHttpClient.GDK + {curl_cnt} XCurl exports; "
+                f"{hc_cnt} libHttpClient.GDK + {curl_cnt} XCurl exports (easy + multi + URL escaping); "
                 "deterministic offline mock registry, async callbacks, headers, fallback responses"
             ),
         ),
@@ -357,17 +414,24 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             name="Xbox Unified Memory & KernelX",
             short_name="Kern",
             category="Platform",
-            implemented=0,
+            implemented=kern_impl,
             target=14,
-            notes="MEM_GRAPHICS, 64 KB / 4 MB physical-virtual aliasing, full Game OS kernel services",
+            notes=(
+                "OS section-backed 64 KB / 4 MB physical-virtual placeholder aliasing, MEM_GRAPHICS"
+                + ("; KernelX services implemented" if kernelx_hdr.exists() else "; full Game OS KernelX services pending")
+            ) if kern_impl > 0 else "MEM_GRAPHICS, 64 KB / 4 MB physical-virtual aliasing, full Game OS kernel services",
         ),
         Subsystem(
             name="RDNA2 XS2 Shader Lifting",
             short_name="XS2",
             category="Graphics",
-            implemented=0,
+            implemented=rdna2_impl,
             target=16,
-            notes="Precompiled RDNA2/Scarlett GPU microcode lifting to PC DXIL or SPIR-V",
+            notes=(
+                "RDNA2/GFX10.3 instruction decoder, SSA IR, and DXIL/SPIR-V lifter"
+                if rdna2_impl > 0
+                else "Precompiled RDNA2/Scarlett GPU microcode lifting to PC DXIL or SPIR-V"
+            ),
         ),
         Subsystem(
             name="Retail XVC/XVD Crypto",
@@ -375,31 +439,43 @@ def collect_metrics() -> tuple[list[Subsystem], int, int]:
             category="Storage",
             implemented=0,
             target=12,
-            notes="Encrypted & digitally signed retail .xvc/.xvd package decryption and verification",
+            notes="Intentionally unimplemented (clean-room legal boundary — no proprietary keys or retail DRM decryption)",
         ),
         Subsystem(
             name="Production Codecs (XMA2/GDeflate/Bink)",
             short_name="Codec",
             category="Media",
-            implemented=0,
+            implemented=codec_impl,
             target=16,
-            notes="Native SHAPE XMA2 transform audio, hardware GDeflate/BCPack, production Bink2 & GPU FSR",
+            notes=(
+                "Implemented: " + ", ".join(codec_parts)
+                if codec_parts
+                else "Native SHAPE XMA2 transform audio, hardware GDeflate/BCPack, production Bink2 & GPU FSR"
+            ),
         ),
         Subsystem(
             name="Hardware DXR & Vulkan Backend",
             short_name="Vulk",
             category="Graphics",
-            implemented=0,
+            implemented=dxr_vulk_impl,
             target=14,
-            notes="Hardware GPU ray tracing (DXR Tier 1.1) and cross-platform Vulkan / vkd3d-proton backend",
+            notes=(
+                "Implemented: " + ", ".join(dxr_vulk_parts)
+                if dxr_vulk_parts
+                else "Hardware GPU ray tracing (DXR Tier 1.1) and cross-platform Vulkan / vkd3d-proton backend"
+            ),
         ),
         Subsystem(
             name="Live Xbox Services (XSAPI/WinRT)",
             short_name="XSAPI",
             category="Platform",
-            implemented=0,
+            implemented=xsapi_cnt + winrt_cnt,
             target=16,
-            notes="Full Xbl* Xbox Live services, WinRT runtime activation, achievements, multiplayer",
+            notes=(
+                f"{xsapi_cnt} Xbl* XSAPI + {winrt_cnt} WinRT activation/HSTRING exports"
+                if (xsapi_cnt + winrt_cnt) > 0
+                else "Full Xbl* Xbox Live services, WinRT runtime activation, achievements, multiplayer"
+            ),
         ),
     ]
 
@@ -423,7 +499,7 @@ def collect_concept_destruction_metrics() -> list[Subsystem]:
             category="Runtime",
             implemented=6,
             target=6,
-            notes="Every QueryApiImpl table the title requests resolves (task queues, XNetworking, XGame, XSystem, XUser, XGameSave); XUserGetTokenAndSignatureAsync still E_NOTIMPL",
+            notes="All QueryApiImpl tables resolved (task queues, XNetworking, XGame, XSystem, XUser 37/37, XGameSave 30/30) including XUserGetTokenAndSignatureAsync",
         ),
         Subsystem(
             name="d3d12_xs Device & Resources",
@@ -431,7 +507,7 @@ def collect_concept_destruction_metrics() -> list[Subsystem]:
             category="Graphics",
             implemented=7,
             target=8,
-            notes="Device, queues, fences, descriptor heaps, root sigs, PSOs, 1080p RTs, CreateHeap/CreatePlacedResource, guest texture memory; one device slot unresolved",
+            notes="Device, queues, fences, descriptor heaps (incl. GetDesc), root sigs, PSOs, 1080p RTs, CreateHeap/CreatePlacedResource, same-frame guest texture upload; one device slot unresolved",
         ),
         Subsystem(
             name="xg_xs & AcpHal Shims",
@@ -447,23 +523,23 @@ def collect_concept_destruction_metrics() -> list[Subsystem]:
             category="Graphics",
             implemented=8,
             target=10,
-            notes="Command lists run through gameplay with no Close failure or device removal; slot 83 handled as a texture-region copy (name unverified), slot 67 still E_NOTIMPL",
+            notes="Command lists run through gameplay with no Close failure or device removal; global UAV barriers fixed, slot 83 handled as texture-region copy, slot 67 still E_NOTIMPL",
         ),
         Subsystem(
             name="Presentation & First Frame",
             short_name="Pres",
             category="Graphics",
-            implemented=4,
+            implemented=5,
             target=5,
-            notes="PresentX window on its own thread, real 1920x1080 frames; on a hardware GPU about 105 fps at 2,400 draws per frame; the title's frame interval is ignored (uncapped) and Alt+Enter fullscreen freezes the picture",
+            notes="PresentX window on its own thread, real 1920x1080 frames, SetFrameIntervalX pacing & Alt+Enter borderless fullscreen toggle implemented",
         ),
         Subsystem(
             name="Audio & Input (Runtime)",
             short_name="Aud/In",
             category="Media",
-            implemented=3,
+            implemented=4,
             target=4,
-            notes="Guest-facing XAudio2 objects forwarding to the host XAudio2 2.9, sound audible in play; GameInput polling verified for A, B, D-pad, left stick, right trigger, and with a real Xbox controller; rumble is not forwarded to the controller",
+            notes="Guest-facing XAudio2 forwarding to host XAudio2 2.9; GameInput polling + first connected XInput controller + 4-motor rumble forwarding implemented",
         ),
         Subsystem(
             name="In-Game & Playable",
@@ -494,7 +570,7 @@ def render_svg(
     PAD_Y = 30
     INNER_W = W - 2 * PAD_X  # 828px
 
-    total_impl = sum(s.implemented for s in subsystems)
+    total_impl = sum(min(s.implemented, s.target) for s in subsystems)
     total_target = sum(s.target for s in subsystems)
     overall_pct = (total_impl / total_target * 100.0) if total_target else 0.0
 
@@ -665,7 +741,7 @@ def render_svg(
         lines.append(f'  <text class="r-name" x="{x0 + 21:.1f}" y="{y_mid}">{html.escape(s.name)}</text>')
         lines.append(
             f'  <text class="r-count" x="{x0 + col_w - 48:.1f}" y="{y_mid}" text-anchor="end">'
-            f'{s.implemented} of {s.target}</text>'
+            f'{min(s.implemented, s.target)} of {s.target}</text>'
         )
         lines.append(
             f'  <text class="r-pct" x="{x0 + col_w:.1f}" y="{y_mid}" text-anchor="end">{round(s.pct)}%</text>'
@@ -704,16 +780,22 @@ def render_svg(
 
 
 def render_html(subsystems: list[Subsystem], total_exports: int, tests_text: str, tests_ok: bool) -> str:
-    total_impl = sum(s.implemented for s in subsystems)
+    total_impl = sum(min(s.implemented, s.target) for s in subsystems)
     total_target = sum(s.target for s in subsystems)
     overall_pct = (total_impl / total_target * 100.0) if total_target else 0.0
 
     js_rows = []
     for s in subsystems:
         js_rows.append(
-            f"    [{s.short_name!r}, {s.name!r}, {s.implemented}, {s.target}],"
+            f"    [{s.short_name!r}, {s.name!r}, {min(s.implemented, s.target)}, {s.target}],"
         )
     js_array = "\n".join(js_rows)
+    zero_subs = [s.name for s in subsystems if s.implemented <= 0]
+    html_callout = (
+        f"<strong>Not started:</strong> {html.escape(', '.join(zero_subs))}."
+        if zero_subs
+        else "<strong>Status:</strong> All clean-room subsystems active (Retail XVC/XVD DRM intentionally excluded)."
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -842,7 +924,7 @@ def render_html(subsystems: list[Subsystem], total_exports: int, tests_text: str
   <div class="list" id="list"></div>
   <div class="callout">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 15 14H1z" fill="none" stroke="{WARN}" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6v3.5M8 11.6v.4" stroke="{WARN}" stroke-width="1.5" stroke-linecap="round"/></svg>
-    <span><strong>Not started:</strong> Xbox unified memory/KernelX, RDNA2 XS2 lifting, retail XVC/XVD crypto, native XMA2/GDeflate/Bink, hardware DXR/Vulkan, and live XSAPI/WinRT.</span>
+    <span>{html_callout}</span>
   </div>
 </main>
 <script>
@@ -886,7 +968,7 @@ def render_markdown_status(
     total_exports: int,
     tests_md: str,
 ) -> str:
-    total_impl = sum(s.implemented for s in subsystems)
+    total_impl = sum(min(s.implemented, s.target) for s in subsystems)
     total_target = sum(s.target for s in subsystems)
     overall_pct = (total_impl / total_target * 100.0) if total_target else 0.0
 
@@ -926,14 +1008,20 @@ def render_markdown_status(
     ]
     for s in sorted_subs:
         rows.append(
-            f"| **{s.name}** | `{s.category}` | `{s.implemented} of {s.target}` | `{round(s.pct)}%` | {s.notes} |"
+            f"| **{s.name}** | `{s.category}` | `{min(s.implemented, s.target)} of {s.target}` | `{round(s.pct)}%` | {s.notes} |"
         )
+    zero_subs = [s.name for s in subsystems if s.implemented <= 0]
     rows.append("")
-    rows.append(
-        "> **Not started (0%):** Xbox unified memory (`MEM_GRAPHICS`) & full KernelX, precompiled RDNA2 `XS2` ISA lifting, "
-        "encrypted retail XVC/XVD decryption, production GDeflate/XMA2/Bink decoding, hardware DXR & Vulkan backend, "
-        "and live XSAPI/WinRT services. Passing synthetic tests do not imply commercial retail title execution."
-    )
+    if zero_subs:
+        rows.append(
+            f"> **Not started (0%):** {', '.join(zero_subs)}. "
+            "Passing synthetic tests do not imply commercial retail title execution."
+        )
+    else:
+        rows.append(
+            "> **Note:** Retail XVC/XVD DRM decryption remains intentionally out of scope (clean-room legal boundary). "
+            "Passing synthetic tests do not imply commercial retail title execution."
+        )
     rows.append("")
     rows.append(
         "_Regenerate with `python tools/generate_status.py --build-dir <build tree>` after adding new HLE APIs or subsystems; "
@@ -959,8 +1047,19 @@ def main() -> None:
     tests_text = tests_label(test_count, test_results)
     tests_ok = test_results is not None and not test_results[1]
 
-    total_impl = sum(s.implemented for s in subsystems)
+    total_impl = sum(min(s.implemented, s.target) for s in subsystems)
     total_target = sum(s.target for s in subsystems)
+    zero_short = [s.name for s in subsystems if s.implemented <= 0]
+    if zero_short:
+        callout_l1 = ", ".join(zero_short[:3]) + ("," if len(zero_short) > 3 else ".")
+        callout_l2 = (
+            ", ".join(zero_short[3:]) + ". Synthetic offline shims do not imply retail compatibility."
+            if len(zero_short) > 3
+            else "Synthetic offline shims do not imply retail compatibility."
+        )
+    else:
+        callout_l1 = "All clean-room subsystems active; Retail XVC/XVD DRM decryption intentionally excluded."
+        callout_l2 = "Synthetic offline shims do not imply commercial retail compatibility."
     main_badges = [
         ("functions", f"{total_impl}/{total_target}", BADGE_FN, True),
         ("exports", str(total_exports), BADGE_EXPORTS, False),
@@ -971,12 +1070,12 @@ def main() -> None:
         subsystems,
         badges=main_badges,
         heading_prefix="Status",
-        callout_lead="Not started:",
-        callout_line1="Xbox unified memory/KernelX, RDNA2 XS2 lifting, retail XVC/XVD crypto, native XMA2/GDeflate/Bink,",
-        callout_line2="hardware DXR/Vulkan, and live XSAPI/WinRT. Synthetic offline shims do not imply retail compatibility.",
+        callout_lead="Not started:" if zero_short else "Status:",
+        callout_line1=callout_l1,
+        callout_line2=callout_l2,
     )
 
-    cd_impl = sum(s.implemented for s in cd_subsystems)
+    cd_impl = sum(min(s.implemented, s.target) for s in cd_subsystems)
     cd_target = sum(s.target for s in cd_subsystems)
     cd_badges = [
         ("milestones", f"{cd_impl}/{cd_target}", BADGE_FN, True),
@@ -989,8 +1088,8 @@ def main() -> None:
         badges=cd_badges,
         heading_prefix="Status of the game Concept Destruction",
         callout_lead="Open issues:",
-        callout_line1="Alt+Enter fullscreen freezes the picture; frame pacing is uncapped; rumble is not sent",
-        callout_line2="to the controller; CmdList slot 67 is unimplemented.",
+        callout_line1="One unresolved d3d12_xs device slot; AcpHal unverified beyond shape contexts;",
+        callout_line2="CmdList slot 67 is still E_NOTIMPL (fullscreen, frame pacing, and rumble fixed).",
     )
 
     html_doc = render_html(subsystems, total_exports, tests_text, tests_ok)

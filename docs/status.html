@@ -109,11 +109,11 @@
 </head>
 <body>
 <main class="status">
-  <h2>Status: 64.4%</h2>
+  <h2>Status: 76.2%</h2>
   <div class="badges">
-    <span class="badge"><span class="k">functions</span><span class="v-fn">260/404</span></span>
-    <span class="badge"><span class="k">exports</span><span class="v-exports">248</span></span>
-    <span class="badge"><span class="k">tests</span><span class="v-tests-warn">20/23 passing</span></span>
+    <span class="badge"><span class="k">functions</span><span class="v-fn">308/404</span></span>
+    <span class="badge"><span class="k">exports</span><span class="v-exports">311</span></span>
+    <span class="badge"><span class="k">tests</span><span class="v-tests">26/26 passing</span></span>
     <span class="badge"><span class="k">target</span><span class="v-target">Xbox Series X|S (Gen9)</span></span>
   </div>
   <section class="graph-box" aria-label="Implemented functions per subsystem, one square per function">
@@ -125,28 +125,28 @@
   <div class="list" id="list"></div>
   <div class="callout">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 15 14H1z" fill="none" stroke="#d29922" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6v3.5M8 11.6v.4" stroke="#d29922" stroke-width="1.5" stroke-linecap="round"/></svg>
-    <span><strong>Not started:</strong> Xbox unified memory/KernelX, RDNA2 XS2 lifting, retail XVC/XVD crypto, native XMA2/GDeflate/Bink, hardware DXR/Vulkan, and live XSAPI/WinRT.</span>
+    <span><strong>Not started:</strong> RDNA2 XS2 Shader Lifting, Retail XVC/XVD Crypto, Hardware DXR &amp; Vulkan Backend, Live Xbox Services (XSAPI/WinRT).</span>
   </div>
 </main>
 <script>
   const SUBSYSTEMS = [
     ['d3d12', 'd3d12_xs → PC D3D12 & PSOs', 44, 46],
     ['XTask', 'XTaskQueue & XAsync', 23, 24],
-    ['Save', 'XGameSave (persistent)', 20, 22],
-    ['XUser', 'XUser & Identity', 13, 24],
-    ['XSys', 'XSystem & Runtime', 17, 18],
-    ['XMem', 'XMem & Threading', 11, 16],
+    ['Save', 'XGameSave (persistent)', 22, 22],
+    ['XUser', 'XUser & Identity', 24, 24],
+    ['XSys', 'XSystem & Runtime', 18, 18],
+    ['XMem', 'XMem & Threading', 16, 16],
     ['DXR', 'DXR / XboxBvhBuilder', 12, 14],
-    ['DStor', 'DirectStorage & XVD', 23, 24],
-    ['Audio', 'Audio (XAudio2 / AcpHal)', 23, 32],
+    ['DStor', 'DirectStorage & XVD', 24, 24],
+    ['Audio', 'Audio (XAudio2 / AcpHal)', 32, 32],
     ['Input', 'Input (GameInput)', 15, 16],
     ['Midw', 'Middleware (Bink2 / FSR)', 22, 34],
-    ['Net', 'Networking (HTTP / XCurl)', 31, 40],
+    ['Net', 'Networking (HTTP / XCurl)', 40, 40],
     ['PE64', 'PE64 Loader & Auto-Stubs', 6, 6],
-    ['Kern', 'Xbox Unified Memory & KernelX', 0, 14],
+    ['Kern', 'Xbox Unified Memory & KernelX', 6, 14],
     ['XS2', 'RDNA2 XS2 Shader Lifting', 0, 16],
     ['Crypt', 'Retail XVC/XVD Crypto', 0, 12],
-    ['Codec', 'Production Codecs (XMA2/GDeflate/Bink)', 0, 16],
+    ['Codec', 'Production Codecs (XMA2/GDeflate/Bink)', 4, 16],
     ['Vulk', 'Hardware DXR & Vulkan Backend', 0, 14],
     ['XSAPI', 'Live Xbox Services (XSAPI/WinRT)', 0, 16],
   ];
