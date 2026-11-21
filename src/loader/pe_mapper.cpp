@@ -356,6 +356,13 @@ Status MappedPeImage::MapFile(const std::string& pe_path,
         return Status::Error(StatusCode::UnsupportedFormat,
                              "Expected x86-64 PE32+ image for Scarlett");
     }
+    const size_t section_table = static_cast<size_t>(dos->e_lfanew) +
+                                 offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                                 nt->FileHeader.SizeOfOptionalHeader;
+    if (section_table + nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) >
+        raw.size()) {
+        return Status::Error(StatusCode::ParseError, "Truncated section table");
+    }
 
     preferred_image_base_ = nt->OptionalHeader.ImageBase;
     size_of_image_ = nt->OptionalHeader.SizeOfImage;
@@ -424,12 +431,22 @@ Status MappedPeImage::MapFile(const std::string& pe_path,
     if (delta != 0 && nt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC) {
         const auto& reloc_dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
         if (reloc_dir.VirtualAddress != 0 && reloc_dir.Size > 0) {
+            if (static_cast<size_t>(reloc_dir.VirtualAddress) + reloc_dir.Size > size_of_image_) {
+                Unmap();
+                return Status::Error(StatusCode::ParseError,
+                                     "Relocation directory exceeds PE image size");
+            }
             size_t offset = 0;
             while (offset + sizeof(IMAGE_BASE_RELOCATION) <= reloc_dir.Size) {
                 const auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(
                     mapped_base_ + reloc_dir.VirtualAddress + offset);
                 if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) {
                     break;
+                }
+                if (block->SizeOfBlock > reloc_dir.Size - offset) {
+                    Unmap();
+                    return Status::Error(StatusCode::ParseError,
+                                         "Relocation block exceeds relocation directory");
                 }
                 const size_t entry_count =
                     (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(uint16_t);
