@@ -25,6 +25,28 @@ int main() {
     SX_REQUIRE(cfg.PrimaryExecutable() != nullptr);
     SX_REQUIRE(cfg.PrimaryExecutable()->name == "Game.exe");
 
+    const std::string formatted_xml = R"(
+<Game configVersion = '1'>
+  <Identity Name = 'TestStudio.FormattedGame' />
+  <ShellVisuals DefaultDisplayName = 'Arcade > Racing &amp; &quot;Rally&quot; &apos;98 &lt;Demo&gt; &amp;lt;' />
+  <ExecutableList>
+    <Executable OverrideDisplayName="Alternate Title" Alias='Name="Wrong.exe"'
+                Name
+                = 'Formatted.exe' TargetDeviceFamily = "Scarlett" />
+  </ExecutableList>
+</Game>
+)";
+
+    scarlettx::GameConfig formatted_cfg;
+    st = scarlettx::ParseGameConfigXml(formatted_xml, formatted_cfg);
+    SX_REQUIRE(st.ok());
+    SX_REQUIRE(formatted_cfg.config_version == "1");
+    SX_REQUIRE(formatted_cfg.identity_name == "TestStudio.FormattedGame");
+    SX_REQUIRE(formatted_cfg.display_name == "Arcade > Racing & \"Rally\" '98 <Demo> &lt;");
+    SX_REQUIRE(formatted_cfg.IsNativeScarlett());
+    SX_REQUIRE(formatted_cfg.PrimaryExecutable() != nullptr);
+    SX_REQUIRE(formatted_cfg.PrimaryExecutable()->name == "Formatted.exe");
+
     const std::string gen9_aware_xml = R"(
 <Game configVersion="0">
   <Identity Name="TestStudio.OldGame" Publisher="CN=Test" Version="1.0.0.0" />

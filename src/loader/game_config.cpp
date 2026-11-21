@@ -1,9 +1,12 @@
 #include "scarlettx/loader/game_config.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <string_view>
+#include <utility>
 
 namespace scarlettx {
 
@@ -28,23 +31,60 @@ std::string Trim(const std::string& s) {
     return s.substr(start, end - start);
 }
 
-bool ExtractAttribute(const std::string& tag, const std::string& attr_name, std::string& out_value) {
-    const std::string needle = attr_name + "=";
-    size_t pos = tag.find(needle);
-    if (pos == std::string::npos) {
-        return false;
+constexpr std::string_view kXmlWhitespace = " \t\r\n";
+
+std::string DecodeAttributeValue(std::string_view value) {
+    static constexpr std::array<std::pair<std::string_view, char>, 5> entities = {{
+        {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''},
+    }};
+
+    std::string decoded;
+    decoded.reserve(value.size());
+    while (!value.empty()) {
+        if (value.front() == '&') {
+            const auto entity = std::find_if(entities.begin(), entities.end(), [value](const auto& entry) {
+                return value.starts_with(entry.first);
+            });
+            if (entity != entities.end()) {
+                decoded.push_back(entity->second);
+                value.remove_prefix(entity->first.size());
+                continue;
+            }
+        }
+        decoded.push_back(value.front());
+        value.remove_prefix(1);
     }
-    pos += needle.size();
-    if (pos >= tag.size() || (tag[pos] != '"' && tag[pos] != '\'')) {
-        return false;
+    return decoded;
+}
+
+bool ExtractAttribute(std::string_view tag, std::string_view attr_name, std::string& out_value) {
+    size_t pos = tag.find_first_of(kXmlWhitespace);
+    while ((pos = tag.find_first_not_of(kXmlWhitespace, pos)) != std::string_view::npos) {
+        const size_t name_end = tag.find_first_of(" \t\r\n=/>", pos);
+        if (name_end == pos || name_end == std::string_view::npos) {
+            return false;
+        }
+
+        const size_t equals = tag.find_first_not_of(kXmlWhitespace, name_end);
+        if (equals == std::string_view::npos || tag[equals] != '=') {
+            return false;
+        }
+
+        const size_t quote = tag.find_first_not_of(kXmlWhitespace, equals + 1);
+        if (quote == std::string_view::npos || (tag[quote] != '"' && tag[quote] != '\'')) {
+            return false;
+        }
+        const size_t value_end = tag.find(tag[quote], quote + 1);
+        if (value_end == std::string_view::npos) {
+            return false;
+        }
+        if (tag.substr(pos, name_end - pos) == attr_name) {
+            out_value = DecodeAttributeValue(tag.substr(quote + 1, value_end - quote - 1));
+            return true;
+        }
+        pos = value_end + 1;
     }
-    const char quote = tag[pos++];
-    const size_t end = tag.find(quote, pos);
-    if (end == std::string::npos) {
-        return false;
-    }
-    out_value = tag.substr(pos, end - pos);
-    return true;
+    return false;
 }
 
 bool ExtractElementText(const std::string& xml, const std::string& element, std::string& out_text) {
@@ -66,13 +106,27 @@ bool ExtractElementText(const std::string& xml, const std::string& element, std:
     return true;
 }
 
+size_t FindTagEnd(const std::string& xml, size_t pos) {
+    while ((pos = xml.find_first_of(">\"'", pos)) != std::string::npos) {
+        if (xml[pos] == '>') {
+            return pos;
+        }
+        pos = xml.find(xml[pos], pos + 1);
+        if (pos == std::string::npos) {
+            break;
+        }
+        ++pos;
+    }
+    return std::string::npos;
+}
+
 bool ExtractTagBlock(const std::string& xml, const std::string& element, std::string& out_tag, size_t search_from = 0, size_t* out_next = nullptr) {
     const std::string open_prefix = "<" + element;
     size_t pos = xml.find(open_prefix, search_from);
     while (pos != std::string::npos) {
         const size_t after = pos + open_prefix.size();
         if (after < xml.size() && (std::isspace(static_cast<unsigned char>(xml[after])) || xml[after] == '>' || xml[after] == '/')) {
-            size_t gt = xml.find('>', after);
+            const size_t gt = FindTagEnd(xml, after);
             if (gt == std::string::npos) {
                 return false;
             }
