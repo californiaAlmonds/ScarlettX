@@ -199,11 +199,19 @@ Status Emulator::BootPackage(const std::string& package_dir) {
                              "CreateProcessA failed for guest executable: " + report.executable_path);
     }
 
-    WaitForSingleObject(pi.hProcess, 60000);
+    const bool timed_out = WaitForSingleObject(pi.hProcess, 60000) == WAIT_TIMEOUT;
+    if (timed_out) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
     DWORD exit_code = 1;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+
+    if (timed_out) {
+        return Status::Error(StatusCode::DeviceError, "Guest process did not exit within 60 seconds and was stopped");
+    }
 
     if (exit_code != 0) {
         char hex_buf[32] = {};
