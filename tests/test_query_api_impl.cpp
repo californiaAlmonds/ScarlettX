@@ -521,11 +521,22 @@ int main() {
             CHECK(none == nullptr);
         }
 
-        // XGameSaveDeleteContainerAsync is in the table but not implemented.
-        CHECK(LoadVtableSlot<FnOther>(save, 0x58)(save, 0, 0, 0) == static_cast<XGameResult>(0x80004001u));
+        // Slots 8-9 (0x40-0x48): XGameSaveGetRemainingQuotaAsync / Result.
+        using FnQuotaAsync = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, void*, XAsyncBlock*);
+        using FnQuotaResult = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XAsyncBlock*, int64_t*);
+        XAsyncBlock q_async{};
+        CHECK(LoadVtableSlot<FnQuotaAsync>(save, 0x40)(save, provider, &q_async) == XGR_S_OK);
+        int64_t q_val = 0;
+        CHECK(LoadVtableSlot<FnQuotaResult>(save, 0x48)(save, &q_async, &q_val) == XGR_S_OK && q_val > 0);
 
+        // Slots 11-12 (0x58-0x60): XGameSaveDeleteContainerAsync / Result.
+        using FnDelAsync = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, void*, const char*, XAsyncBlock*);
+        using FnDelResult = XGameResult (SCARLETTX_GDK_CALLBACK*)(void*, XAsyncBlock*);
         LoadVtableSlot<FnClose>(save, 0x88)(save, container);
-        CHECK(LoadVtableSlot<FnDelete>(save, 0x50)(save, provider, "slot_a") == XGR_S_OK);
+        XAsyncBlock del_async{};
+        CHECK(LoadVtableSlot<FnDelAsync>(save, 0x58)(save, provider, "slot_a", &del_async) == XGR_S_OK);
+        CHECK(LoadVtableSlot<FnDelResult>(save, 0x60)(save, &del_async) == XGR_S_OK);
+        (void)sizeof(FnOther);
         seen = Seen{};
         CHECK(LoadVtableSlot<FnContainersByName>(save, 0x68)(save, provider, "slot_a", &seen, on_container) == XGR_S_OK);
         CHECK(seen.containers == 0);

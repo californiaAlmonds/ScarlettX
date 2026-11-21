@@ -331,11 +331,28 @@ uint64_t ComputeDirectorySize(const fs::path& dir) {
 }
 
 // ---------------------------------------------------------------------------
-// XMem hooks
+// XMem hooks & OS-backed physical page aliasing registry
 // ---------------------------------------------------------------------------
 std::mutex g_mem_hooks_mutex;
 XMemAllocFunction* g_mem_alloc_hook = nullptr;
 XMemFreeFunction* g_mem_free_hook = nullptr;
+
+struct PhysicalPageBlock {
+    size_t size = 0;
+    uint32_t page_size = 65536;
+#if defined(_WIN32)
+    HANDLE section = nullptr;
+#else
+    std::vector<uint8_t> backing;
+#endif
+};
+
+std::mutex g_phys_pages_mutex;
+uint64_t g_next_phys_handle = 1;
+std::unordered_map<uint64_t, PhysicalPageBlock> g_phys_blocks;
+std::unordered_map<void*, uint64_t> g_phys_mappings;
+
+std::atomic<bool> g_full_download_bandwidth{false};
 
 // ---------------------------------------------------------------------------
 // XThread TLS flag
@@ -454,6 +471,11 @@ XGameResult XSystemGetXboxLiveSandboxId(
 
 bool XSystemIsHandleValid(void* handle) {
     return IsRegisteredHandle(handle) || xgr::IsTaskQueueHandle(handle);
+}
+
+XGameResult XSystemAllowFullDownloadBandwidth(bool allow) {
+    g_full_download_bandwidth.store(allow, std::memory_order_relaxed);
+    return XGR_S_OK;
 }
 
 // ===========================================================================
@@ -1576,6 +1598,132 @@ XGameResult XGameSaveEnumerateBlobInfo(
     return XGR_S_OK;
 }
 
+XGameResult XGameSaveGetRemainingQuotaAsync(
+    XGameSaveProviderHandle provider,
+    XAsyncBlock* async) {
+    if (!provider || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    return BeginAsyncOperation(async, [provider](XAsyncState* st) {
+        int64_t quota = 0;
+        const XGameResult hr = XGameSaveGetRemainingQuota(provider, &quota);
+        if (hr == XGR_S_OK) {
+            st->result_payload.resize(sizeof(quota));
+            std::memcpy(st->result_payload.data(), &quota, sizeof(quota));
+            CompleteAsyncState(st, XGR_S_OK, sizeof(quota));
+        } else {
+            CompleteAsyncState(st, hr, 0);
+        }
+    });
+}
+
+XGameResult XGameSaveGetRemainingQuotaResult(
+    XAsyncBlock* async,
+    int64_t* remainingQuota) {
+    if (!async || !remainingQuota) {
+        return XGR_E_INVALIDARG;
+    }
+    const XGameResult hr = XAsyncGetStatus(async, true);
+    if (hr != XGR_S_OK) {
+        return hr;
+    }
+    auto state = GetAsyncState(async);
+    if (!state || state->result_payload.size() < sizeof(int64_t)) {
+        return XGR_E_FAIL;
+    }
+    std::memcpy(remainingQuota, state->result_payload.data(), sizeof(int64_t));
+    xgr::ReleaseHleAsyncResult(async);
+    return XGR_S_OK;
+}
+
+XGameResult XGameSaveDeleteContainerAsync(
+    XGameSaveProviderHandle provider,
+    const char* name,
+    XAsyncBlock* async) {
+    if (!provider || !name || !*name || !async) {
+        return XGR_E_INVALIDARG;
+    }
+    std::string cname(name);
+    return BeginAsyncOperation(async, [provider, cname = std::move(cname)](XAsyncState* st) {
+        const XGameResult hr = XGameSaveDeleteContainer(provider, cname.c_str());
+        CompleteAsyncState(st, hr, 0);
+    });
+}
+
+XGameResult XGameSaveDeleteContainerResult(XAsyncBlock* async) {
+    if (!async) {
+        return XGR_E_INVALIDARG;
+    }
+    return XAsyncGetStatus(async, true);
+}
+
+XGameResult XGameSaveGetContainerInfo(
+    XGameSaveProviderHandle provider,
+    const char* name,
+    void* context,
+    XGameSaveContainerInfoCallback* callback) {
+    if (!provider || !name || !*name || !callback) {
+        return XGR_E_INVALIDARG;
+    }
+    struct Filter {
+        std::string target;
+        void* ctx;
+        XGameSaveContainerInfoCallback* cb;
+    } filter{SanitizeSaveName(name), context, callback};
+    auto thunk = [](const XGameSaveContainerInfo* info, void* p) -> bool {
+        auto* f = static_cast<Filter*>(p);
+        const char* n = (info && info->name) ? info->name : "";
+        return (f->target == n) ? f->cb(info, f->ctx) : true;
+    };
+    return XGameSaveEnumerateContainerInfo(provider, &filter, thunk);
+}
+
+XGameResult XGameSaveEnumerateContainerInfoByName(
+    XGameSaveProviderHandle provider,
+    const char* containerNamePrefix,
+    void* context,
+    XGameSaveContainerInfoCallback* callback) {
+    if (!provider || !callback) {
+        return XGR_E_INVALIDARG;
+    }
+    struct Filter {
+        std::string prefix;
+        void* ctx;
+        XGameSaveContainerInfoCallback* cb;
+    } filter{(containerNamePrefix && *containerNamePrefix) ? SanitizeSaveName(containerNamePrefix) : std::string(),
+             context, callback};
+    auto thunk = [](const XGameSaveContainerInfo* info, void* p) -> bool {
+        auto* f = static_cast<Filter*>(p);
+        const char* n = (info && info->name) ? info->name : "";
+        const bool match = f->prefix.empty() || std::strncmp(n, f->prefix.c_str(), f->prefix.size()) == 0;
+        return match ? f->cb(info, f->ctx) : true;
+    };
+    return XGameSaveEnumerateContainerInfo(provider, &filter, thunk);
+}
+
+XGameResult XGameSaveEnumerateBlobInfoByName(
+    XGameSaveContainerHandle container,
+    const char* blobNamePrefix,
+    void* context,
+    XGameSaveBlobInfoCallback* callback) {
+    if (!container || !callback) {
+        return XGR_E_INVALIDARG;
+    }
+    struct Filter {
+        std::string prefix;
+        void* ctx;
+        XGameSaveBlobInfoCallback* cb;
+    } filter{(blobNamePrefix && *blobNamePrefix) ? SanitizeSaveName(blobNamePrefix) : std::string(),
+             context, callback};
+    auto thunk = [](const XGameSaveBlobInfo* info, void* p) -> bool {
+        auto* f = static_cast<Filter*>(p);
+        const char* n = (info && info->name) ? info->name : "";
+        const bool match = f->prefix.empty() || std::strncmp(n, f->prefix.c_str(), f->prefix.size()) == 0;
+        return match ? f->cb(info, f->ctx) : true;
+    };
+    return XGameSaveEnumerateBlobInfo(container, &filter, thunk);
+}
+
 // ===========================================================================
 // XMem.h
 // ===========================================================================
@@ -1668,6 +1816,162 @@ bool XMemVirtualFree(void* address, size_t size, uint32_t freeType) {
     (void)freeType;
     std::free(address);
     return true;
+#endif
+}
+
+bool XMemVirtualProtect(
+    void* address,
+    size_t size,
+    uint32_t newProtect,
+    uint32_t* oldProtect) {
+    if (!address || size == 0) {
+        return false;
+    }
+#if defined(_WIN32)
+    DWORD old_val = 0;
+    const DWORD flNew = newProtect ? static_cast<DWORD>(newProtect) : PAGE_READWRITE;
+    const BOOL ok = VirtualProtect(address, size, flNew, &old_val);
+    if (oldProtect) {
+        *oldProtect = static_cast<uint32_t>(old_val);
+    }
+    return ok != 0;
+#else
+    (void)newProtect;
+    if (oldProtect) {
+        *oldProtect = 0x04;  // PAGE_READWRITE
+    }
+    return true;
+#endif
+}
+
+size_t XMemVirtualQuery(
+    const void* address,
+    void* buffer,
+    size_t length) {
+    if (!address || !buffer || length == 0) {
+        return 0;
+    }
+#if defined(_WIN32)
+    return VirtualQuery(address, static_cast<PMEMORY_BASIC_INFORMATION>(buffer), length);
+#else
+    std::memset(buffer, 0, length);
+    return length;
+#endif
+}
+
+XGameResult XMemAllocatePhysicalPages(
+    size_t sizeBytes,
+    uint32_t pageSizeBytes,
+    uint64_t* outPhysicalHandle) {
+    if (!outPhysicalHandle || sizeBytes == 0) {
+        return XGR_E_INVALIDARG;
+    }
+    *outPhysicalHandle = 0;
+    const uint32_t page_sz = (pageSizeBytes == 4096u || pageSizeBytes == 65536u ||
+                              pageSizeBytes == 2u * 1024u * 1024u || pageSizeBytes == 4u * 1024u * 1024u)
+                                 ? pageSizeBytes
+                                 : 65536u;
+    const size_t gran = page_sz < 65536u ? 65536u : static_cast<size_t>(page_sz);
+    const size_t aligned = (sizeBytes + gran - 1u) & ~(gran - 1u);
+
+    PhysicalPageBlock block{};
+    block.size = aligned;
+    block.page_size = page_sz;
+#if defined(_WIN32)
+    const DWORD hi = static_cast<DWORD>((static_cast<uint64_t>(aligned) >> 32) & 0xFFFFFFFFull);
+    const DWORD lo = static_cast<DWORD>(static_cast<uint64_t>(aligned) & 0xFFFFFFFFull);
+    block.section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, hi, lo, nullptr);
+    if (!block.section) {
+        return XGR_E_OUTOFMEMORY;
+    }
+#else
+    block.backing.assign(aligned, 0);
+#endif
+    std::lock_guard<std::mutex> lock(g_phys_pages_mutex);
+    const uint64_t id = g_next_phys_handle++;
+    g_phys_blocks.emplace(id, std::move(block));
+    *outPhysicalHandle = id;
+    return XGR_S_OK;
+}
+
+XGameResult XMemFreePhysicalPages(uint64_t physicalHandle) {
+    if (physicalHandle == 0) {
+        return XGR_E_INVALIDARG;
+    }
+    std::lock_guard<std::mutex> lock(g_phys_pages_mutex);
+    auto it = g_phys_blocks.find(physicalHandle);
+    if (it == g_phys_blocks.end()) {
+        return XGR_E_HANDLE;
+    }
+#if defined(_WIN32)
+    if (it->second.section) {
+        CloseHandle(it->second.section);
+        it->second.section = nullptr;
+    }
+#endif
+    g_phys_blocks.erase(it);
+    return XGR_S_OK;
+}
+
+XGameResult XMemMapPhysicalPages(
+    void* desiredAddress,
+    uint64_t physicalHandle,
+    size_t offsetBytes,
+    size_t sizeBytes,
+    uint32_t protect,
+    void** outMappedAddress) {
+    if (!outMappedAddress || physicalHandle == 0) {
+        return XGR_E_INVALIDARG;
+    }
+    *outMappedAddress = nullptr;
+    std::lock_guard<std::mutex> lock(g_phys_pages_mutex);
+    auto it = g_phys_blocks.find(physicalHandle);
+    if (it == g_phys_blocks.end()) {
+        return XGR_E_HANDLE;
+    }
+    const auto& block = it->second;
+    const size_t map_size = sizeBytes == 0 ? (block.size - offsetBytes) : sizeBytes;
+    if (offsetBytes > block.size || map_size == 0 || map_size > block.size - offsetBytes) {
+        return XGR_E_INVALIDARG;
+    }
+#if defined(_WIN32)
+    if ((offsetBytes & 0xFFFFu) != 0) {
+        return XGR_E_INVALIDARG;  // Windows MapViewOfFile requires 64 KB offset granularity
+    }
+    const DWORD access = (protect == PAGE_READONLY) ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
+    const DWORD off_hi = static_cast<DWORD>((static_cast<uint64_t>(offsetBytes) >> 32) & 0xFFFFFFFFull);
+    const DWORD off_lo = static_cast<DWORD>(static_cast<uint64_t>(offsetBytes) & 0xFFFFFFFFull);
+    void* view = MapViewOfFileEx(block.section, access, off_hi, off_lo, map_size, desiredAddress);
+    if (!view) {
+        return XGR_E_OUTOFMEMORY;
+    }
+    g_phys_mappings[view] = physicalHandle;
+    *outMappedAddress = view;
+    return XGR_S_OK;
+#else
+    (void)desiredAddress;
+    (void)protect;
+    void* ptr = it->second.backing.data() + offsetBytes;
+    g_phys_mappings[ptr] = physicalHandle;
+    *outMappedAddress = ptr;
+    return XGR_S_OK;
+#endif
+}
+
+XGameResult XMemUnmapPhysicalPages(void* mappedAddress) {
+    if (!mappedAddress) {
+        return XGR_E_INVALIDARG;
+    }
+    std::lock_guard<std::mutex> lock(g_phys_pages_mutex);
+    auto it = g_phys_mappings.find(mappedAddress);
+    if (it == g_phys_mappings.end()) {
+        return XGR_E_HANDLE;
+    }
+    g_phys_mappings.erase(it);
+#if defined(_WIN32)
+    return UnmapViewOfFile(mappedAddress) ? XGR_S_OK : XGR_E_FAIL;
+#else
+    return XGR_S_OK;
 #endif
 }
 

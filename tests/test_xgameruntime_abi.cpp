@@ -165,6 +165,8 @@ int main() {
 
     CHECK(XSystemGetXboxLiveSandboxId(sizeof(buf), buf, &used) == XGR_S_OK);
     CHECK(std::strcmp(buf, "RETAIL") == 0);
+    CHECK(XSystemAllowFullDownloadBandwidth(true) == XGR_S_OK);
+    CHECK(XSystemAllowFullDownloadBandwidth(false) == XGR_S_OK);
 
     // 3. XTaskQueue (manual + monitor + delayed + duplicate + terminate)
     XTaskQueueHandle manual_q = nullptr;
@@ -511,7 +513,73 @@ int main() {
     void* vmem = XMemVirtualAlloc(nullptr, 65536, 0, 0);
     CHECK(vmem != nullptr);
     std::memset(vmem, 0xAB, 4096);
+    uint32_t old_prot = 0;
+    CHECK(XMemVirtualProtect(vmem, 4096, 0x02 /*PAGE_READONLY*/, &old_prot) == true);
+    CHECK(XMemVirtualProtect(vmem, 4096, 0x04 /*PAGE_READWRITE*/, &old_prot) == true);
+    uint8_t mbi[64]{};
+    CHECK(XMemVirtualQuery(vmem, mbi, sizeof(mbi)) > 0);
     CHECK(XMemVirtualFree(vmem, 0, 0) == true);
+
+    // Physical page allocation + dual-VA aliasing (writes to view1 appear live in view2)
+    {
+        uint64_t phys = 0;
+        CHECK(XMemAllocatePhysicalPages(131072, 65536, &phys) == XGR_S_OK && phys != 0);
+        void* view1 = nullptr;
+        void* view2 = nullptr;
+        CHECK(XMemMapPhysicalPages(nullptr, phys, 0, 65536, 0x04, &view1) == XGR_S_OK && view1 != nullptr);
+        CHECK(XMemMapPhysicalPages(nullptr, phys, 0, 65536, 0x04, &view2) == XGR_S_OK && view2 != nullptr);
+        CHECK(view1 != view2);
+        static_cast<uint8_t*>(view1)[0] = 0x5Au;
+        static_cast<uint8_t*>(view1)[4095] = 0xC3u;
+        CHECK(static_cast<uint8_t*>(view2)[0] == 0x5Au);
+        CHECK(static_cast<uint8_t*>(view2)[4095] == 0xC3u);
+        CHECK(XMemUnmapPhysicalPages(view2) == XGR_S_OK);
+        CHECK(XMemUnmapPhysicalPages(view1) == XGR_S_OK);
+        CHECK(XMemFreePhysicalPages(phys) == XGR_S_OK);
+    }
+
+    // Async quota & container filter/delete APIs on XGameSave
+    {
+        XGameSaveProviderHandle p2 = nullptr;
+        CHECK(XGameSaveInitializeProvider(user, "00000000-0000-0000-0000-00005ca00002", false, &p2) == XGR_S_OK);
+        XAsyncBlock qa{};
+        qa.queue = tp_q;
+        CHECK(XGameSaveGetRemainingQuotaAsync(p2, &qa) == XGR_S_OK);
+        int64_t async_quota = 0;
+        CHECK(XGameSaveGetRemainingQuotaResult(&qa, &async_quota) == XGR_S_OK && async_quota > 0);
+
+        XGameSaveContainerHandle c2 = nullptr;
+        CHECK(XGameSaveCreateContainer(p2, "alpha_slot", &c2) == XGR_S_OK);
+        XGameSaveUpdateHandle u2 = nullptr;
+        CHECK(XGameSaveCreateUpdate(c2, "Alpha", &u2) == XGR_S_OK);
+        const uint8_t d[] = {9, 8, 7};
+        CHECK(XGameSaveSubmitBlobWrite(u2, "hero_stats", d, sizeof(d)) == XGR_S_OK);
+        CHECK(XGameSaveSubmitUpdate(u2) == XGR_S_OK);
+        XGameSaveCloseUpdate(u2);
+
+        std::vector<std::string> exact_c;
+        CHECK(XGameSaveGetContainerInfo(p2, "alpha_slot", &exact_c, EnumContainersCb) == XGR_S_OK);
+        CHECK(exact_c.size() == 1 && exact_c[0] == "alpha_slot");
+
+        std::vector<std::string> pref_c;
+        CHECK(XGameSaveEnumerateContainerInfoByName(p2, "alpha", &pref_c, EnumContainersCb) == XGR_S_OK);
+        CHECK(pref_c.size() == 1);
+
+        std::vector<std::string> pref_b;
+        CHECK(XGameSaveEnumerateBlobInfoByName(c2, "hero", &pref_b, EnumBlobsCb) == XGR_S_OK);
+        CHECK(pref_b.size() == 1 && pref_b[0] == "hero_stats");
+        XGameSaveCloseContainer(c2);
+
+        XAsyncBlock da{};
+        da.queue = tp_q;
+        CHECK(XGameSaveDeleteContainerAsync(p2, "alpha_slot", &da) == XGR_S_OK);
+        CHECK(XGameSaveDeleteContainerResult(&da) == XGR_S_OK);
+
+        std::vector<std::string> after_c;
+        CHECK(XGameSaveGetContainerInfo(p2, "alpha_slot", &after_c, EnumContainersCb) == XGR_S_OK);
+        CHECK(after_c.empty());
+        XGameSaveCloseProvider(p2);
+    }
 
     // 8. XThread
     CHECK(XThreadIsTimeSensitive() == false);

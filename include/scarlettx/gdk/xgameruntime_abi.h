@@ -263,6 +263,7 @@ SCARLETTX_XGR_API XGameResult XSystemGetXboxLiveSandboxId(
     char* sandboxId,
     size_t* sandboxIdUsed);
 SCARLETTX_XGR_API bool XSystemIsHandleValid(void* handle);
+SCARLETTX_XGR_API XGameResult XSystemAllowFullDownloadBandwidth(bool allow);
 
 // ---------------------------------------------------------------------------
 // XUser.h
@@ -548,6 +549,12 @@ SCARLETTX_XGR_API void XGameSaveCloseProvider(XGameSaveProviderHandle provider);
 SCARLETTX_XGR_API XGameResult XGameSaveGetRemainingQuota(
     XGameSaveProviderHandle provider,
     int64_t* remainingQuota);
+SCARLETTX_XGR_API XGameResult XGameSaveGetRemainingQuotaAsync(
+    XGameSaveProviderHandle provider,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XGameSaveGetRemainingQuotaResult(
+    XAsyncBlock* async,
+    int64_t* remainingQuota);
 SCARLETTX_XGR_API XGameResult XGameSaveCreateContainer(
     XGameSaveProviderHandle provider,
     const char* name,
@@ -556,8 +563,23 @@ SCARLETTX_XGR_API void XGameSaveCloseContainer(XGameSaveContainerHandle context)
 SCARLETTX_XGR_API XGameResult XGameSaveDeleteContainer(
     XGameSaveProviderHandle provider,
     const char* name);
+SCARLETTX_XGR_API XGameResult XGameSaveDeleteContainerAsync(
+    XGameSaveProviderHandle provider,
+    const char* name,
+    XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XGameSaveDeleteContainerResult(XAsyncBlock* async);
+SCARLETTX_XGR_API XGameResult XGameSaveGetContainerInfo(
+    XGameSaveProviderHandle provider,
+    const char* name,
+    void* context,
+    XGameSaveContainerInfoCallback* callback);
 SCARLETTX_XGR_API XGameResult XGameSaveEnumerateContainerInfo(
     XGameSaveProviderHandle provider,
+    void* context,
+    XGameSaveContainerInfoCallback* callback);
+SCARLETTX_XGR_API XGameResult XGameSaveEnumerateContainerInfoByName(
+    XGameSaveProviderHandle provider,
+    const char* containerNamePrefix,
     void* context,
     XGameSaveContainerInfoCallback* callback);
 SCARLETTX_XGR_API XGameResult XGameSaveCreateUpdate(
@@ -599,6 +621,11 @@ SCARLETTX_XGR_API XGameResult XGameSaveEnumerateBlobInfo(
     XGameSaveContainerHandle container,
     void* context,
     XGameSaveBlobInfoCallback* callback);
+SCARLETTX_XGR_API XGameResult XGameSaveEnumerateBlobInfoByName(
+    XGameSaveContainerHandle container,
+    const char* blobNamePrefix,
+    void* context,
+    XGameSaveBlobInfoCallback* callback);
 
 // ---------------------------------------------------------------------------
 // XMem.h (GDK Memory & Unified Virtual Memory Hooks)
@@ -629,6 +656,28 @@ SCARLETTX_XGR_API bool XMemVirtualFree(
     void* address,
     size_t size,
     uint32_t freeType);
+SCARLETTX_XGR_API bool XMemVirtualProtect(
+    void* address,
+    size_t size,
+    uint32_t newProtect,
+    uint32_t* oldProtect);
+SCARLETTX_XGR_API size_t XMemVirtualQuery(
+    const void* address,
+    void* buffer,
+    size_t length);
+SCARLETTX_XGR_API XGameResult XMemAllocatePhysicalPages(
+    size_t sizeBytes,
+    uint32_t pageSizeBytes,
+    uint64_t* outPhysicalHandle);
+SCARLETTX_XGR_API XGameResult XMemFreePhysicalPages(uint64_t physicalHandle);
+SCARLETTX_XGR_API XGameResult XMemMapPhysicalPages(
+    void* desiredAddress,
+    uint64_t physicalHandle,
+    size_t offsetBytes,
+    size_t sizeBytes,
+    uint32_t protect,
+    void** outMappedAddress);
+SCARLETTX_XGR_API XGameResult XMemUnmapPhysicalPages(void* mappedAddress);
 
 // ---------------------------------------------------------------------------
 // XThread.h & XGame.h

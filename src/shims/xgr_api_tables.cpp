@@ -458,10 +458,32 @@ XGameResult SCARLETTX_GDK_CALLBACK SaveGetRemainingQuota(void*, XGameSaveProvide
     return XGameSaveGetRemainingQuota(provider, quota);
 }
 
+XGameResult SCARLETTX_GDK_CALLBACK SaveGetRemainingQuotaAsync(void*, XGameSaveProviderHandle provider,
+                                                              XAsyncBlock* async) {
+    const XGameResult hr = XGameSaveGetRemainingQuotaAsync(provider, async);
+    TraceGameSave("XGameSaveGetRemainingQuotaAsync", hr);
+    return hr;
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK SaveGetRemainingQuotaResult(void*, XAsyncBlock* async, int64_t* quota) {
+    return XGameSaveGetRemainingQuotaResult(async, quota);
+}
+
 XGameResult SCARLETTX_GDK_CALLBACK SaveDeleteContainer(void*, XGameSaveProviderHandle provider, const char* name) {
     const XGameResult hr = XGameSaveDeleteContainer(provider, name);
     TraceGameSave("XGameSaveDeleteContainer", hr);
     return hr;
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK SaveDeleteContainerAsync(void*, XGameSaveProviderHandle provider, const char* name,
+                                                            XAsyncBlock* async) {
+    const XGameResult hr = XGameSaveDeleteContainerAsync(provider, name, async);
+    TraceGameSave("XGameSaveDeleteContainerAsync", hr);
+    return hr;
+}
+
+XGameResult SCARLETTX_GDK_CALLBACK SaveDeleteContainerResult(void*, XAsyncBlock* async) {
+    return XGameSaveDeleteContainerResult(async);
 }
 
 XGameResult SCARLETTX_GDK_CALLBACK SaveEnumerateContainerInfo(void*, XGameSaveProviderHandle provider, void* context,
@@ -471,44 +493,15 @@ XGameResult SCARLETTX_GDK_CALLBACK SaveEnumerateContainerInfo(void*, XGameSavePr
     return hr;
 }
 
-// Slots 13, 15 and 19 filter the full enumeration by name or name prefix. The
-// enumeration reports stored names, so the filter compares in that form.
-template <typename Info, typename Callback>
-struct SaveNameFilter {
-    std::string name;
-    bool exact;
-    void* context;
-    Callback* callback;
-
-    static bool SCARLETTX_GDK_CALLBACK Thunk(const Info* info, void* filter_ptr) {
-        auto* filter = static_cast<SaveNameFilter*>(filter_ptr);
-        const char* name = info && info->name ? info->name : "";
-        const bool match = filter->exact ? filter->name == name
-                                         : std::strncmp(name, filter->name.c_str(), filter->name.size()) == 0;
-        return match ? filter->callback(info, filter->context) : true;
-    }
-};
-using SaveContainerFilter = SaveNameFilter<XGameSaveContainerInfo, XGameSaveContainerInfoCallback>;
-using SaveBlobFilter = SaveNameFilter<XGameSaveBlobInfo, XGameSaveBlobInfoCallback>;
-
-// An empty prefix matches every name.
-std::string StoredSavePrefix(const char* prefix) {
-    return prefix && *prefix ? StoredSaveName(prefix) : std::string();
-}
-
 XGameResult SCARLETTX_GDK_CALLBACK SaveGetContainerInfo(void*, XGameSaveProviderHandle provider, const char* name,
                                                         void* context, XGameSaveContainerInfoCallback* callback) {
-    if (!name || !callback) return XGR_E_INVALIDARG;
-    SaveContainerFilter filter{StoredSaveName(name), true, context, callback};
-    return XGameSaveEnumerateContainerInfo(provider, &filter, &SaveContainerFilter::Thunk);
+    return XGameSaveGetContainerInfo(provider, name, context, callback);
 }
 
 XGameResult SCARLETTX_GDK_CALLBACK SaveEnumerateContainerInfoByName(void*, XGameSaveProviderHandle provider,
                                                                     const char* prefix, void* context,
                                                                     XGameSaveContainerInfoCallback* callback) {
-    if (!callback) return XGR_E_INVALIDARG;
-    SaveContainerFilter filter{StoredSavePrefix(prefix), false, context, callback};
-    return XGameSaveEnumerateContainerInfo(provider, &filter, &SaveContainerFilter::Thunk);
+    return XGameSaveEnumerateContainerInfoByName(provider, prefix, context, callback);
 }
 
 XGameResult SCARLETTX_GDK_CALLBACK SaveCreateContainer(void*, XGameSaveProviderHandle provider, const char* name,
@@ -530,9 +523,7 @@ XGameResult SCARLETTX_GDK_CALLBACK SaveEnumerateBlobInfo(void*, XGameSaveContain
 XGameResult SCARLETTX_GDK_CALLBACK SaveEnumerateBlobInfoByName(void*, XGameSaveContainerHandle container,
                                                                const char* prefix, void* context,
                                                                XGameSaveBlobInfoCallback* callback) {
-    if (!callback) return XGR_E_INVALIDARG;
-    SaveBlobFilter filter{StoredSavePrefix(prefix), false, context, callback};
-    return XGameSaveEnumerateBlobInfo(container, &filter, &SaveBlobFilter::Thunk);
+    return XGameSaveEnumerateBlobInfoByName(container, prefix, context, callback);
 }
 
 XGameResult SCARLETTX_GDK_CALLBACK SaveReadBlobData(void*, XGameSaveContainerHandle container, const char** names,
@@ -597,7 +588,11 @@ std::array<Slot, kGameSaveSlots> MakeGameSaveVtbl(std::index_sequence<I...>) {
     vtbl[5] = reinterpret_cast<Slot>(&SaveInitializeProviderResult);
     vtbl[6] = reinterpret_cast<Slot>(&SaveCloseProvider);
     vtbl[7] = reinterpret_cast<Slot>(&SaveGetRemainingQuota);
+    vtbl[8] = reinterpret_cast<Slot>(&SaveGetRemainingQuotaAsync);
+    vtbl[9] = reinterpret_cast<Slot>(&SaveGetRemainingQuotaResult);
     vtbl[10] = reinterpret_cast<Slot>(&SaveDeleteContainer);
+    vtbl[11] = reinterpret_cast<Slot>(&SaveDeleteContainerAsync);
+    vtbl[12] = reinterpret_cast<Slot>(&SaveDeleteContainerResult);
     vtbl[13] = reinterpret_cast<Slot>(&SaveGetContainerInfo);
     vtbl[14] = reinterpret_cast<Slot>(&SaveEnumerateContainerInfo);
     vtbl[15] = reinterpret_cast<Slot>(&SaveEnumerateContainerInfoByName);
