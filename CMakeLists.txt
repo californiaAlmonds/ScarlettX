@@ -19,6 +19,7 @@ add_library(scarlettx_core STATIC
     src/loader/xvd_container.cpp
     src/io/gdeflate.cpp
     src/kernel/xmemory.cpp
+    src/kernel/gpu_tile_pool.cpp
     src/kernel/xruntime.cpp
     src/kernel/xstorage.cpp
     src/gpu/d3d12_backend.cpp
@@ -141,6 +142,11 @@ set_target_properties(XCurl PROPERTIES PREFIX "" OUTPUT_NAME "XCurl")
 target_link_libraries(XCurl PRIVATE scarlettx_core)
 target_compile_definitions(XCurl PRIVATE SCARLETTX_BUILDING_XCURL=1)
 
+add_library(kernelx SHARED src/shims/kernelx_shim.cpp)
+set_target_properties(kernelx PROPERTIES PREFIX "" OUTPUT_NAME "kernelx")
+target_link_libraries(kernelx PRIVATE scarlettx_core)
+target_compile_definitions(kernelx PRIVATE SCARLETTX_BUILDING_KERNELX=1)
+
 # ---------------------------------------------------------------------------
 # ScarlettX CLI Emulator Runner
 # ---------------------------------------------------------------------------
@@ -161,6 +167,7 @@ add_dependencies(scarlettx
     amd_fidelityfx_loader_xbox
     libHttpClient_GDK
     XCurl
+    kernelx
 )
 
 # ---------------------------------------------------------------------------
@@ -298,6 +305,8 @@ if(WIN32)
 endif()
 
 scarlettx_add_test(test_kernel_hle tests/test_kernel_hle.cpp)
+scarlettx_add_test(test_kernelx tests/test_kernelx.cpp)
+target_link_libraries(test_kernelx PRIVATE kernelx)
 scarlettx_add_test(test_xgameruntime_abi tests/test_xgameruntime_abi.cpp)
 target_link_libraries(test_xgameruntime_abi PRIVATE xgameruntime)
 scarlettx_add_test(test_query_api_impl tests/test_query_api_impl.cpp)
