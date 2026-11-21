@@ -773,6 +773,189 @@ bool TestRunStress() {
     return true;
 }
 
+// --- XTaskQueueCanDispatch & XAsyncBeginAlloc --------------------------------
+
+struct AllocProviderCtx {
+    uint32_t magic;
+    uint32_t value;
+    bool was_zero_init;
+};
+
+struct AllocTracker {
+    std::atomic<int> begin_calls{0};
+    std::atomic<int> work_calls{0};
+    std::atomic<int> result_calls{0};
+    std::atomic<int> cleanup_calls{0};
+    std::atomic<int> zero_init_ok{0};
+    std::atomic<int> cleanup_saw_magic{0};
+    std::atomic<int> completions{0};
+    int32_t fail_begin_hr{kOk};
+};
+
+AllocTracker* g_alloc_tracker = nullptr;
+const char kAllocIdentity[] = "alloc_provider";
+
+XGameResult SCARLETTX_GDK_CALLBACK AllocProvider(XAsyncOp op, const XAsyncProviderData* data) {
+    auto* ctx = static_cast<AllocProviderCtx*>(data->context);
+    AllocTracker* tr = g_alloc_tracker;
+    switch (op) {
+        case XAsyncOp_Begin: {
+            tr->begin_calls.fetch_add(1);
+            if (ctx) {
+                const bool zeroed = (ctx->magic == 0 && ctx->value == 0 && !ctx->was_zero_init);
+                ctx->was_zero_init = zeroed;
+                ctx->magic = 0xA110C555u;
+                ctx->value = 0x5CA91E77u;
+                if (zeroed) {
+                    tr->zero_init_ok.fetch_add(1);
+                }
+            }
+            if (tr->fail_begin_hr < 0) {
+                return tr->fail_begin_hr;
+            }
+            return XAsyncSchedule(data->async, 0);
+        }
+        case XAsyncOp_DoWork:
+            tr->work_calls.fetch_add(1);
+            if (ctx) {
+                ctx->value ^= 0x00FF00FFu;
+                XAsyncComplete(data->async, XGR_S_OK, sizeof(uint32_t));
+                return XGR_E_PENDING;
+            }
+            return XGR_S_OK;
+        case XAsyncOp_GetResult:
+            tr->result_calls.fetch_add(1);
+            if (!ctx || data->bufferSize < sizeof(uint32_t)) {
+                return XGR_E_FAIL;
+            }
+            *static_cast<uint32_t*>(data->buffer) = ctx->value;
+            return XGR_S_OK;
+        case XAsyncOp_Cancel:
+            XAsyncComplete(data->async, XGR_E_ABORT, 0);
+            return XGR_S_OK;
+        case XAsyncOp_Cleanup:
+            tr->cleanup_calls.fetch_add(1);
+            if (ctx && ctx->magic == 0xA110C555u) {
+                tr->cleanup_saw_magic.fetch_add(1);
+            }
+            return XGR_S_OK;
+        default:
+            return XGR_E_FAIL;
+    }
+}
+
+void SCARLETTX_GDK_CALLBACK AllocCompletion(XAsyncBlock* block) {
+    static_cast<AllocTracker*>(block->context)->completions.fetch_add(1);
+}
+
+bool TestCanDispatchAndBeginAlloc() {
+    // 1. XTaskQueueCanDispatch on manual, pool, immediate, delayed, and composite queues.
+    CHECK(!XTaskQueueCanDispatch(nullptr, XTaskQueuePort_Work));
+
+    XTaskQueueHandle manual = nullptr;
+    CHECK(XTaskQueueCreate(XTaskQueueDispatchMode_Manual, XTaskQueueDispatchMode_Manual, &manual) ==
+          XGR_S_OK);
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Completion));
+    CHECK(!XTaskQueueCanDispatch(manual, static_cast<XTaskQueuePort>(2)));
+
+    Counters cnt;
+    CHECK(XTaskQueueSubmitCallback(manual, XTaskQueuePort_Work, &cnt, CountCb) == XGR_S_OK);
+    CHECK(XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Completion));
+    CHECK(XTaskQueueDispatch(manual, XTaskQueuePort_Work, 0));
+    CHECK(cnt.ran.load() == 1);
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+
+    // Composite queue sharing the same manual port observes readiness.
+    XTaskQueuePortHandle work_port = nullptr;
+    CHECK(XTaskQueueGetPort(manual, XTaskQueuePort_Work, &work_port) == XGR_S_OK);
+    XTaskQueueHandle comp = nullptr;
+    CHECK(XTaskQueueCreateComposite(work_port, work_port, &comp) == XGR_S_OK);
+    CHECK(!XTaskQueueCanDispatch(comp, XTaskQueuePort_Completion));
+    CHECK(XTaskQueueSubmitCallback(comp, XTaskQueuePort_Completion, &cnt, CountCb) == XGR_S_OK);
+    CHECK(XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    CHECK(XTaskQueueCanDispatch(comp, XTaskQueuePort_Completion));
+    CHECK(XTaskQueueDispatch(comp, XTaskQueuePort_Completion, 0));
+    CHECK(cnt.ran.load() == 2);
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    XTaskQueueCloseHandle(comp);
+
+    // Delayed callback becomes dispatchable only after delay elapses.
+    CHECK(XTaskQueueSubmitDelayedCallback(manual, XTaskQueuePort_Work, 30, &cnt, CountCb) ==
+          XGR_S_OK);
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    CHECK(WaitFor([&] { return XTaskQueueCanDispatch(manual, XTaskQueuePort_Work); }));
+    CHECK(XTaskQueueDispatch(manual, XTaskQueuePort_Work, 0));
+    CHECK(cnt.ran.load() == 3);
+    CHECK(!XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+
+    // Non-manual ports are never manually dispatchable.
+    XTaskQueueHandle pool = nullptr;
+    CHECK(XTaskQueueCreate(XTaskQueueDispatchMode_ThreadPool, XTaskQueueDispatchMode_Immediate,
+                           &pool) == XGR_S_OK);
+    CHECK(!XTaskQueueCanDispatch(pool, XTaskQueuePort_Work));
+    CHECK(!XTaskQueueCanDispatch(pool, XTaskQueuePort_Completion));
+    XTaskQueueCloseHandle(pool);
+
+    // 2. XAsyncBeginAlloc lifecycle with zero-initialized context + payload + automatic free.
+    AllocTracker tracker;
+    g_alloc_tracker = &tracker;
+
+    XAsyncBlock invalid_block{};
+    CHECK(XAsyncBeginAlloc(nullptr, kAllocIdentity, "alloc", AllocProvider,
+                           sizeof(AllocProviderCtx)) == XGR_E_INVALIDARG);
+    CHECK(XAsyncBeginAlloc(&invalid_block, kAllocIdentity, "alloc", nullptr,
+                           sizeof(AllocProviderCtx)) == XGR_E_INVALIDARG);
+
+    XAsyncBlock block{};
+    block.queue = manual;
+    block.context = &tracker;
+    block.callback = AllocCompletion;
+    CHECK(XAsyncBeginAlloc(&block, kAllocIdentity, "alloc", AllocProvider,
+                           sizeof(AllocProviderCtx)) == XGR_S_OK);
+    CHECK(tracker.begin_calls.load() == 1 && tracker.zero_init_ok.load() == 1);
+    CHECK(XTaskQueueCanDispatch(manual, XTaskQueuePort_Work));
+    CHECK(XTaskQueueDispatch(manual, XTaskQueuePort_Work, 0));
+    CHECK(tracker.work_calls.load() == 1);
+    CHECK(XAsyncGetStatus(&block, false) == XGR_S_OK);
+
+    size_t res_size = 0;
+    CHECK(XAsyncGetResultSize(&block, &res_size) == XGR_S_OK && res_size == sizeof(uint32_t));
+    CHECK(XTaskQueueCanDispatch(manual, XTaskQueuePort_Completion));
+    CHECK(XTaskQueueDispatch(manual, XTaskQueuePort_Completion, 0));
+    CHECK(tracker.completions.load() == 1);
+
+    uint32_t out_val = 0;
+    size_t used = 0;
+    CHECK(XAsyncGetResult(&block, kAllocIdentity, sizeof(out_val), &out_val, &used) == XGR_S_OK);
+    CHECK(used == sizeof(uint32_t) && out_val == (0x5CA91E77u ^ 0x00FF00FFu));
+    CHECK(tracker.cleanup_calls.load() == 1 && tracker.cleanup_saw_magic.load() == 1);
+
+    // Failing Begin still runs Cleanup with valid allocated context and sets error status.
+    tracker.fail_begin_hr = XGR_E_FAIL;
+    XAsyncBlock fail_block{};
+    fail_block.queue = manual;
+    CHECK(XAsyncBeginAlloc(&fail_block, kAllocIdentity, "alloc_fail", AllocProvider,
+                           sizeof(AllocProviderCtx)) == XGR_S_OK);
+    CHECK(XAsyncGetStatus(&fail_block, false) == XGR_E_FAIL);
+    CHECK(tracker.cleanup_calls.load() == 2 && tracker.cleanup_saw_magic.load() == 2);
+
+    // Zero-size allocation passes null context and completes cleanly without payload.
+    tracker.fail_begin_hr = kOk;
+    XAsyncBlock zero_block{};
+    zero_block.queue = manual;
+    CHECK(XAsyncBeginAlloc(&zero_block, kAllocIdentity, "alloc_zero", AllocProvider, 0) ==
+          XGR_S_OK);
+    CHECK(XTaskQueueDispatch(manual, XTaskQueuePort_Work, 0));
+    CHECK(XAsyncGetStatus(&zero_block, false) == XGR_S_OK);
+    CHECK(tracker.cleanup_calls.load() == 3);
+
+    g_alloc_tracker = nullptr;
+    XTaskQueueCloseHandle(manual);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -788,6 +971,7 @@ int main() {
         {"close from callback", TestCloseFromCallback},
         {"provider lifecycle", TestProviderLifecycle},
         {"XAsyncRun stress", TestRunStress},
+        {"CanDispatch & BeginAlloc", TestCanDispatchAndBeginAlloc},
     };
     // Two rounds: the second one runs after a full runtime shutdown and restart.
     for (int round = 0; round < 2; ++round) {

@@ -126,6 +126,15 @@ typedef struct ffxQueryDescGetProviderVersion {
     const char* versionName;
 } ffxQueryDescGetProviderVersion;
 
+typedef struct ffxProviderInfo {
+    uint64_t providerId;
+    uint64_t versionId;
+    uint32_t effectType;
+    uint32_t reserved;
+    char name[64];
+    char versionName[64];
+} ffxProviderInfo;
+
 // amd_fidelityfx_upscaler_xbox.dll provider exports
 SCARLETTX_FFX_UPSCALER_API ffxReturnCode_t ffxUpscalerCreateContext(
     ffxContext* context,
@@ -141,6 +150,9 @@ SCARLETTX_FFX_UPSCALER_API ffxReturnCode_t ffxUpscalerQuery(
 SCARLETTX_FFX_UPSCALER_API ffxReturnCode_t ffxUpscalerDispatch(
     ffxContext* context,
     const ffxApiHeader* desc);
+SCARLETTX_FFX_UPSCALER_API ffxReturnCode_t ffxUpscalerGetVersion(
+    uint64_t* outVersionId,
+    const char** outVersionName);
 
 // amd_fidelityfx_loader_xbox.dll public entry points
 SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxCreateContext(
@@ -159,6 +171,16 @@ SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxQuery(
 SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxDispatch(
     ffxContext* context,
     const ffxApiHeader* desc);
+SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxGetVersion(
+    uint64_t* outVersionId,
+    const char** outVersionName);
+SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxGetProviderCount(
+    uint64_t descType,
+    uint32_t* outCount);
+SCARLETTX_FFX_LOADER_API ffxReturnCode_t ffxGetProviderInfo(
+    uint64_t descType,
+    uint32_t providerIndex,
+    ffxProviderInfo* outInfo);
 
 #ifdef __cplusplus
 }

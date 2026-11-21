@@ -142,4 +142,41 @@ SCARLETTX_GAMEINPUT_API int32_t GameInputInjectKeyState(
     const GAMEINPUT_KEY_STATE* keys,
     uint32_t key_count);
 
+enum GAMEINPUT_DEVICE_STATUS : uint32_t {
+    GAMEINPUT_DEVICE_NO_STATUS = 0x00000000,
+    GAMEINPUT_DEVICE_CONNECTED = 0x00000001,
+    GAMEINPUT_DEVICE_INPUT_ENABLED = 0x00000002,
+    GAMEINPUT_DEVICE_OUTPUT_ENABLED = 0x00000004,
+    GAMEINPUT_DEVICE_ANY_STATUS = 0x00FFFFFF,
+};
+
+enum GAMEINPUT_ENUMERATION_KIND : uint32_t {
+    GAMEINPUT_NO_ENUMERATION = 0,
+    GAMEINPUT_ASYNC_ENUMERATION = 1,
+    GAMEINPUT_BLOCKING_ENUMERATION = 2,
+};
+
+typedef void (*GAMEINPUT_DEVICE_CALLBACK)(
+    uint64_t callback_token,
+    void* context,
+    uint64_t device_id,
+    uint64_t timestamp_us,
+    uint32_t current_status,
+    uint32_t previous_status);
+
+SCARLETTX_GAMEINPUT_API int32_t GameInputRegisterDeviceCallback(
+    uint64_t game_input,
+    uint64_t device_id,
+    uint32_t input_filter,
+    uint32_t status_filter,
+    uint32_t enumeration_kind,
+    void* context,
+    GAMEINPUT_DEVICE_CALLBACK callback,
+    uint64_t* out_callback_token);
+
+SCARLETTX_GAMEINPUT_API int32_t GameInputUnregisterCallback(
+    uint64_t game_input,
+    uint64_t callback_token,
+    uint64_t timeout_us);
+
 }  // extern "C"

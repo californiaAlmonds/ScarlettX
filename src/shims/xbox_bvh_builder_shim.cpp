@@ -19,12 +19,21 @@ uint64_t AlignUp(uint64_t v, uint64_t align) {
 struct BlasEntry {
     std::vector<scarlettx::RtTriangle> triangles;
     uint32_t build_flags = 0;
+    bool compacted = false;
     scarlettx::BvhAccelerationStructure bvh;
 };
 
 struct TlasEntry {
+    bool compacted = false;
     scarlettx::BvhAccelerationStructure bvh;
 };
+
+uint64_t ComputeCompactedBytes(const scarlettx::BvhAccelerationStructure& bvh) {
+    const uint64_t nodes = bvh.NodeCount();
+    const uint64_t tris = bvh.TriangleCount();
+    // 64B header + 36B per compact BVH node + 56B per triangle + index
+    return AlignUp(64ull + nodes * 36ull + tris * 56ull, 256ull);
+}
 
 std::mutex g_bvh_mutex;
 uint64_t g_next_bvh_handle = 0xB7000001ull;
@@ -237,6 +246,136 @@ int32_t XboxBvhDestroy(uint64_t handle) {
     if (g_blas_map.erase(handle) > 0 || g_tlas_map.erase(handle) > 0) {
         return 0;
     }
+    return -2;
+}
+
+int32_t XboxBvhGetCompactedSize(uint64_t blas_handle, uint64_t* out_size_bytes) {
+    if (!out_size_bytes) {
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(g_bvh_mutex);
+    if (auto it = g_blas_map.find(blas_handle); it != g_blas_map.end()) {
+        *out_size_bytes = ComputeCompactedBytes(it->second.bvh);
+        return 0;
+    }
+    if (auto tit = g_tlas_map.find(blas_handle); tit != g_tlas_map.end()) {
+        *out_size_bytes = ComputeCompactedBytes(tit->second->bvh);
+        return 0;
+    }
+    return -2;
+}
+
+int32_t XboxBvhCompactBlas(uint64_t src_blas_handle, uint64_t* out_compacted_handle) {
+    if (!out_compacted_handle) {
+        return -1;
+    }
+    *out_compacted_handle = 0;
+
+    std::vector<scarlettx::RtTriangle> tris_copy;
+    uint32_t build_flags = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bvh_mutex);
+        auto it = g_blas_map.find(src_blas_handle);
+        if (it == g_blas_map.end()) {
+            return -2;
+        }
+        tris_copy = it->second.triangles;
+        build_flags = it->second.build_flags & ~static_cast<uint32_t>(D3D12XBOX_AS_BUILD_FLAG_ALLOW_UPDATE);
+    }
+
+    BlasEntry compacted;
+    compacted.triangles = std::move(tris_copy);
+    compacted.triangles.shrink_to_fit();
+    compacted.build_flags = build_flags;
+    compacted.compacted = true;
+    auto st = compacted.bvh.Build(compacted.triangles);
+    if (!st.ok()) {
+        return static_cast<int32_t>(st.code);
+    }
+
+    std::lock_guard<std::mutex> lock(g_bvh_mutex);
+    const uint64_t handle = g_next_bvh_handle++;
+    g_blas_map[handle] = std::move(compacted);
+    *out_compacted_handle = handle;
+    return 0;
+}
+
+int32_t XboxBvhCopyAccelerationStructure(uint64_t src_handle,
+                                         uint32_t copy_mode,
+                                         uint64_t* out_dst_handle) {
+    if (!out_dst_handle) {
+        return -1;
+    }
+    *out_dst_handle = 0;
+    if (copy_mode != D3D12XBOX_AS_COPY_MODE_CLONE &&
+        copy_mode != D3D12XBOX_AS_COPY_MODE_COMPACT) {
+        return -1;
+    }
+
+    const bool is_compact = (copy_mode == D3D12XBOX_AS_COPY_MODE_COMPACT);
+
+    // Check if source is a BLAS
+    {
+        std::vector<scarlettx::RtTriangle> tris_copy;
+        uint32_t flags = 0;
+        bool was_compacted = false;
+        scarlettx::BvhAccelerationStructure bvh_copy;
+        bool found_blas = false;
+        bool found_tlas = false;
+        {
+            std::lock_guard<std::mutex> lock(g_bvh_mutex);
+            if (auto it = g_blas_map.find(src_handle); it != g_blas_map.end()) {
+                found_blas = true;
+                tris_copy = it->second.triangles;
+                flags = it->second.build_flags;
+                was_compacted = it->second.compacted;
+                if (!is_compact) {
+                    bvh_copy = it->second.bvh;
+                }
+            } else if (auto tit = g_tlas_map.find(src_handle); tit != g_tlas_map.end()) {
+                found_tlas = true;
+                was_compacted = tit->second->compacted;
+                bvh_copy = tit->second->bvh;
+            }
+        }
+
+        if (found_blas) {
+            BlasEntry dst;
+            dst.triangles = std::move(tris_copy);
+            if (is_compact) {
+                dst.triangles.shrink_to_fit();
+                dst.build_flags = flags & ~static_cast<uint32_t>(D3D12XBOX_AS_BUILD_FLAG_ALLOW_UPDATE);
+                dst.compacted = true;
+                auto st = dst.bvh.Build(dst.triangles);
+                if (!st.ok()) {
+                    return static_cast<int32_t>(st.code);
+                }
+            } else {
+                dst.build_flags = flags;
+                dst.compacted = was_compacted;
+                dst.bvh = std::move(bvh_copy);
+            }
+
+            std::lock_guard<std::mutex> lock(g_bvh_mutex);
+            const uint64_t handle = g_next_bvh_handle++;
+            g_blas_map[handle] = std::move(dst);
+            *out_dst_handle = handle;
+            return 0;
+        }
+
+        if (found_tlas) {
+            auto dst = std::make_unique<TlasEntry>();
+            dst->bvh = std::move(bvh_copy);
+            dst->compacted = is_compact ? true : was_compacted;
+
+            std::lock_guard<std::mutex> lock(g_bvh_mutex);
+            const uint64_t handle = g_next_bvh_handle++;
+            g_tlas_map[handle] = std::move(dst);
+            *out_dst_handle = handle;
+            return 0;
+        }
+    }
+
     return -2;
 }
 

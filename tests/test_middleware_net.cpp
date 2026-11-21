@@ -11,13 +11,41 @@
         }                                                                       \
     } while (0)
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
+
+std::atomic<int> g_bink_allocs{0};
+std::atomic<int> g_bink_frees{0};
+
+void* TestBinkAlloc(uint64_t bytes) {
+    g_bink_allocs.fetch_add(1);
+    return std::malloc(static_cast<size_t>(bytes));
+}
+
+void TestBinkFree(void* ptr) {
+    if (ptr) {
+        g_bink_frees.fetch_add(1);
+        std::free(ptr);
+    }
+}
+
+void WriteLe32(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>(v & 0xFFu);
+    p[1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+    p[2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+    p[3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+}
 
 size_t CurlWriteToString(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* dst = static_cast<std::string*>(userdata);
@@ -58,10 +86,134 @@ int main() {
         SX_CHECK(sum.Width == 320 && sum.Height == 180);
         SX_CHECK(sum.TotalPlayedFrames == 2);
         BinkClose(bnk);
+
+        // Extended Bink2 APIs: custom allocator, frame rate override, BinkOpenWithOptions,
+        // Background IO, YCbCr FrameBuffers, Async Decode + Wait, Realtime, ShouldSkip, Service
+        g_bink_allocs.store(0);
+        g_bink_frees.store(0);
+        BinkSetMemory(&TestBinkAlloc, &TestBinkFree);
+        BinkSetFrameRate(60, 1);
+
+        // Write a minimal synthetic KB2 header at file offset 128 to verify FileOffset parsing
+        const auto bk2_path = std::filesystem::path(SCARLETTX_BINARY_DIR) / "test_bink_offset.bk2";
+        {
+            std::vector<uint8_t> blob(128 + 44, 0);
+            uint8_t* h = blob.data() + 128;
+            h[0] = 'K'; h[1] = 'B'; h[2] = '2'; h[3] = 'i';
+            WriteLe32(h + 8, 120);   // frames
+            WriteLe32(h + 20, 160);  // width
+            WriteLe32(h + 24, 96);   // height
+            WriteLe32(h + 28, 30);   // file fps
+            WriteLe32(h + 32, 1);    // file fps div
+            std::ofstream ofs(bk2_path, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+        }
+
+        BINK_OPEN_OPTIONS opts{};
+        opts.FileOffset = 128;
+        opts.MaxBufferSize = 512u * 1024u;
+        BINK* b2 = BinkOpenWithOptions(bk2_path.string().c_str(), &opts, 0);
+        SX_CHECK(b2 != nullptr);
+        SX_CHECK(g_bink_allocs.load() >= 1);
+        SX_CHECK(b2->Width == 160 && b2->Height == 96 && b2->Frames == 120);
+        SX_CHECK(b2->FrameRate == 60 && b2->FrameRateDiv == 1);
+
+        // Background IO suspend/resume & BinkService
+        SX_CHECK(BinkControlBackgroundIO(b2, BINKBGIOSUSPEND) == 1);
+        BINKREALTIME rt_before{};
+        BinkGetRealtime(b2, &rt_before, 10);
+        SX_CHECK(rt_before.ReadBufferSize == 512u * 1024u);
+        BinkService(b2);
+        BINKREALTIME rt_susp{};
+        BinkGetRealtime(b2, &rt_susp, 10);
+        SX_CHECK(rt_susp.ReadBufferUsed == rt_before.ReadBufferUsed);
+        SX_CHECK(BinkControlBackgroundIO(b2, BINKBGIORESUME) == 0);
+        BinkService(b2);
+        BINKREALTIME rt_resumed{};
+        BinkGetRealtime(b2, &rt_resumed, 10);
+        SX_CHECK(rt_resumed.ReadBufferUsed > rt_before.ReadBufferUsed);
+
+        // Frame buffers info & registration + async decode into Y/Cr/Cb/A planes
+        BINKFRAMEBUFFERS fb{};
+        BinkGetFrameBuffersInfo(b2, &fb);
+        SX_CHECK(fb.TotalFrames == 2);
+        SX_CHECK(fb.YABufferWidth >= 160 && (fb.YABufferWidth % 16) == 0);
+        SX_CHECK(fb.cRcBBufferWidth >= 80 && (fb.cRcBBufferWidth % 16) == 0);
+
+        std::vector<uint8_t> y_plane[2], a_plane[2], cb_plane[2], cr_plane[2];
+        for (int i = 0; i < 2; ++i) {
+            y_plane[i].assign(static_cast<size_t>(fb.Frames[i].YPitch) * fb.YABufferHeight, 0);
+            a_plane[i].assign(static_cast<size_t>(fb.Frames[i].APitch) * fb.YABufferHeight, 0);
+            cb_plane[i].assign(static_cast<size_t>(fb.Frames[i].cBPitch) * fb.cRcBBufferHeight, 0);
+            cr_plane[i].assign(static_cast<size_t>(fb.Frames[i].cRPitch) * fb.cRcBBufferHeight, 0);
+            fb.Frames[i].YPlane = y_plane[i].data();
+            fb.Frames[i].APlane = a_plane[i].data();
+            fb.Frames[i].cBPlane = cb_plane[i].data();
+            fb.Frames[i].cRPlane = cr_plane[i].data();
+        }
+        BinkRegisterFrameBuffers(b2, &fb);
+
+        BinkNextFrame(b2);
+        SX_CHECK(BinkDoFrameAsync(b2, 0, 1) == 1);
+        SX_CHECK(BinkDoFrameAsyncWait(b2, -1) == 1);
+        SX_CHECK(b2->LastFrameNum == 2);
+        const uint32_t slot = fb.FrameNum;
+        SX_CHECK(slot < 2u);
+        SX_CHECK(y_plane[slot][0] >= 16 && y_plane[slot][0] <= 235);
+        SX_CHECK(a_plane[slot][0] == 255);
+        SX_CHECK(cb_plane[slot][0] >= 16 && cb_plane[slot][0] <= 240);
+        SX_CHECK(cr_plane[slot][0] >= 16 && cr_plane[slot][0] <= 240);
+
+        // Realtime stats & ShouldSkip
+        BINKREALTIME rt_after{};
+        BinkGetRealtime(b2, &rt_after, 10);
+        SX_CHECK(rt_after.FrameNum == 2 && rt_after.FrameRate == 60);
+        SX_CHECK(rt_after.FramesVideoDecompTime >= 1);
+        SX_CHECK(rt_after.FramesDataRate > 0);
+        SX_CHECK(BinkShouldSkip(b2) == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(45));  // > 2 frames at 60fps
+        SX_CHECK(BinkShouldSkip(b2) == 1);
+
+        BINKSUMMARY sum2{};
+        BinkGetSummary(b2, &sum2);
+        SX_CHECK(sum2.FileFrameRate == 30 && sum2.FrameRate == 60);
+        SX_CHECK(sum2.TotalPlayedFrames == 1 && sum2.SkippedFrames >= 1);
+
+        BinkClose(b2);
+        SX_CHECK(g_bink_frees.load() == g_bink_allocs.load());
+        BinkSetMemory(nullptr, nullptr);
+        BinkSetFrameRate(0, 0);
+        std::error_code ec;
+        std::filesystem::remove(bk2_path, ec);
     }
 
     // 2. amd_fidelityfx_loader_xbox.dll -> amd_fidelityfx_upscaler_xbox.dll
     {
+        uint64_t up_ver_id = 0, ld_ver_id = 0;
+        const char* up_ver_name = nullptr;
+        const char* ld_ver_name = nullptr;
+        SX_CHECK(ffxUpscalerGetVersion(&up_ver_id, &up_ver_name) == FFX_API_RETURN_OK);
+        SX_CHECK(ffxGetVersion(&ld_ver_id, &ld_ver_name) == FFX_API_RETURN_OK);
+        SX_CHECK(up_ver_id != 0 && up_ver_id == ld_ver_id);
+        SX_CHECK(up_ver_name != nullptr && ld_ver_name != nullptr);
+        SX_CHECK(std::strcmp(up_ver_name, ld_ver_name) == 0);
+        SX_CHECK(ffxGetVersion(nullptr, nullptr) == FFX_API_RETURN_ERROR_PARAMETER);
+
+        uint32_t prov_count = 0;
+        SX_CHECK(ffxGetProviderCount(FFX_API_DESC_TYPE_UPSCALE_CREATE, &prov_count) == FFX_API_RETURN_OK);
+        SX_CHECK(prov_count == 1u);
+        SX_CHECK(ffxGetProviderCount(0, &prov_count) == FFX_API_RETURN_OK && prov_count == 1u);
+        SX_CHECK(ffxGetProviderCount(0x99990000ull, &prov_count) == FFX_API_RETURN_NO_PROVIDER && prov_count == 0u);
+
+        ffxProviderInfo pinfo{};
+        SX_CHECK(ffxGetProviderInfo(FFX_API_DESC_TYPE_UPSCALE_CREATE, 0, &pinfo) == FFX_API_RETURN_OK);
+        SX_CHECK(pinfo.providerId != 0 && pinfo.versionId == ld_ver_id);
+        SX_CHECK(pinfo.effectType == FFX_API_DESC_TYPE_UPSCALE_CREATE);
+        SX_CHECK(std::string(pinfo.name) == "amd_fidelityfx_upscaler_xbox");
+        SX_CHECK(std::string(pinfo.versionName) == ld_ver_name);
+        SX_CHECK(ffxGetProviderInfo(FFX_API_DESC_TYPE_UPSCALE_CREATE, 1, &pinfo) == FFX_API_RETURN_ERROR_PARAMETER);
+        SX_CHECK(ffxGetProviderInfo(0x99990000ull, 0, &pinfo) == FFX_API_RETURN_NO_PROVIDER);
+
         ffxQueryDescGetProviderVersion ver{};
         ver.header.type = FFX_API_DESC_TYPE_GET_PROVIDER_VERSION;
         SX_CHECK(ffxQuery(nullptr, &ver.header) == FFX_API_RETURN_OK);

@@ -138,6 +138,75 @@ SCARLETTX_XG_API int32_t SCARLETTX_XG_CALL XGCreateTexture2DComputer(
     const XG_TEXTURE2D_DESC* desc,
     void** computer);
 
+typedef enum XG_TILE_MODE {
+    XG_TILE_MODE_LINEAR = 0,
+    XG_TILE_MODE_1D_THIN = 1,
+    XG_TILE_MODE_1D_THICK = 2,
+    XG_TILE_MODE_2D_THIN = 3,
+    XG_TILE_MODE_2D_THICK = 4,
+    XG_TILE_MODE_DISPLAY = 5,
+    XG_TILE_MODE_DEPTH_STENCIL = 6,
+    XG_TILE_MODE_INVALID = 0xFFFFFFFFu
+} XG_TILE_MODE;
+
+typedef struct XG_TEXTURE1D_DESC {
+    uint32_t Width;
+    uint32_t MipLevels;
+    uint32_t ArraySize;
+    uint32_t Format;
+    uint32_t Usage;
+    uint32_t BindFlags;
+    uint32_t CPUAccessFlags;
+    uint32_t MiscFlags;
+    uint32_t SwizzleMode;
+    uint32_t Pitch;
+} XG_TEXTURE1D_DESC;
+
+typedef struct XG_TEXTURE3D_DESC {
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t Depth;
+    uint32_t MipLevels;
+    uint32_t Format;
+    uint32_t Usage;
+    uint32_t BindFlags;
+    uint32_t CPUAccessFlags;
+    uint32_t MiscFlags;
+    uint32_t SwizzleMode;
+    uint32_t Pitch;
+} XG_TEXTURE3D_DESC;
+
+typedef struct XG_BUFFER_DESC {
+    uint32_t ByteWidth;
+    uint32_t Usage;
+    uint32_t BindFlags;
+    uint32_t CPUAccessFlags;
+    uint32_t MiscFlags;
+    uint32_t StructureByteStride;
+    uint32_t SwizzleMode;
+} XG_BUFFER_DESC;
+
+SCARLETTX_XG_API uint32_t SCARLETTX_XG_CALL XGComputeOptimalTileMode(
+    uint32_t resourceDimension,
+    uint32_t format,
+    uint32_t width,
+    uint32_t height,
+    uint32_t depthOrArraySize,
+    uint32_t sampleCount,
+    uint32_t bindFlags);
+
+SCARLETTX_XG_API int32_t SCARLETTX_XG_CALL XGCreateTexture1DComputer(
+    const XG_TEXTURE1D_DESC* desc,
+    void** computer);
+
+SCARLETTX_XG_API int32_t SCARLETTX_XG_CALL XGCreateTexture3DComputer(
+    const XG_TEXTURE3D_DESC* desc,
+    void** computer);
+
+SCARLETTX_XG_API int32_t SCARLETTX_XG_CALL XGCreateBufferComputer(
+    const XG_BUFFER_DESC* desc,
+    void** computer);
+
 #ifdef __cplusplus
 }
 #endif

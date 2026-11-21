@@ -1,8 +1,11 @@
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "scarlettx/input/gameinput_abi.h"
 
@@ -272,6 +275,107 @@ int main() {
                     kReadingNotFound);
         SX_CHECK(reading == nullptr);
         SX_CHECK_EQ(Call(input, kGiGetCurrentReading, uintptr_t{kKindGamepad}, input, &reading), kReadingNotFound);
+    }
+
+    // 6. Flat C API device callback registration, immediate enumeration, reentrancy, unregistration, concurrency
+    {
+        struct FlatEvents {
+            uint64_t gi = 0;
+            bool self_unregister = false;
+            int count = 0;
+            std::vector<uint64_t> device_ids;
+            std::vector<uint32_t> statuses;
+            uint64_t last_token = 0;
+            uint64_t last_ts = 0;
+        };
+        auto on_flat_device = [](uint64_t token, void* ctx, uint64_t dev_id, uint64_t ts,
+                                 uint32_t cur_status, uint32_t prev_status) {
+            auto* ev = static_cast<FlatEvents*>(ctx);
+            ++ev->count;
+            ev->device_ids.push_back(dev_id);
+            ev->statuses.push_back(cur_status);
+            ev->last_token = token;
+            ev->last_ts = ts;
+            if (prev_status != 0) {
+                ev->count = -100;  // unexpected non-zero previous status on initial enumeration
+            }
+            if (ev->self_unregister) {
+                GameInputUnregisterCallback(ev->gi, token, 0);
+            }
+        };
+
+        // Error checks
+        uint64_t tok = 0;
+        SX_CHECK(GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_UNKNOWN, GAMEINPUT_DEVICE_ANY_STATUS,
+                                                 GAMEINPUT_BLOCKING_ENUMERATION, nullptr, nullptr, &tok) != 0);
+        SX_CHECK(GameInputRegisterDeviceCallback(0xDEADBEEFull, 0, GAMEINPUT_KIND_UNKNOWN, GAMEINPUT_DEVICE_ANY_STATUS,
+                                                 GAMEINPUT_BLOCKING_ENUMERATION, nullptr, on_flat_device, &tok) != 0);
+        SX_CHECK(GameInputUnregisterCallback(gi, 0, 0) != 0);
+        SX_CHECK(GameInputUnregisterCallback(0xDEADBEEFull, 1, 0) != 0);
+
+        // Blocking enumeration of all virtual devices (gamepad + keyboard)
+        FlatEvents all_ev{gi, false};
+        SX_CHECK_EQ(GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_UNKNOWN, GAMEINPUT_DEVICE_ANY_STATUS,
+                                                    GAMEINPUT_BLOCKING_ENUMERATION, &all_ev, on_flat_device, &tok),
+                    0);
+        SX_CHECK(tok != 0 && all_ev.last_token == tok);
+        SX_CHECK_EQ(all_ev.count, 2);
+        SX_CHECK(all_ev.last_ts > 0);
+        SX_CHECK_EQ(all_ev.statuses[0] & (GAMEINPUT_DEVICE_CONNECTED | GAMEINPUT_DEVICE_INPUT_ENABLED),
+                    static_cast<uint32_t>(GAMEINPUT_DEVICE_CONNECTED | GAMEINPUT_DEVICE_INPUT_ENABLED));
+        SX_CHECK_EQ(GameInputUnregisterCallback(gi, tok, 0), 0);
+        // Double-unregister must fail cleanly
+        SX_CHECK(GameInputUnregisterCallback(gi, tok, 0) != 0);
+
+        // Filtered enumeration: gamepad only vs keyboard only vs no enumeration
+        FlatEvents pad_ev{gi, false};
+        uint64_t pad_tok = 0;
+        SX_CHECK_EQ(GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_GAMEPAD, GAMEINPUT_DEVICE_CONNECTED,
+                                                    GAMEINPUT_BLOCKING_ENUMERATION, &pad_ev, on_flat_device, &pad_tok),
+                    0);
+        SX_CHECK_EQ(pad_ev.count, 1);
+        SX_CHECK_EQ(pad_ev.device_ids[0], dev_ids[0]);
+        SX_CHECK_EQ(GameInputUnregisterCallback(gi, pad_tok, 1000), 0);
+
+        FlatEvents no_enum_ev{gi, false};
+        uint64_t no_enum_tok = 0;
+        SX_CHECK_EQ(GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_UNKNOWN, GAMEINPUT_DEVICE_ANY_STATUS,
+                                                    GAMEINPUT_NO_ENUMERATION, &no_enum_ev, on_flat_device,
+                                                    &no_enum_tok),
+                    0);
+        SX_CHECK_EQ(no_enum_ev.count, 0);
+        SX_CHECK_EQ(GameInputUnregisterCallback(gi, no_enum_tok, 0), 0);
+
+        // Self-unregistering inside callback stops remaining enumeration cleanly without deadlock
+        FlatEvents self_ev{gi, true};
+        uint64_t self_tok = 0;
+        SX_CHECK_EQ(GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_UNKNOWN, GAMEINPUT_DEVICE_ANY_STATUS,
+                                                    GAMEINPUT_BLOCKING_ENUMERATION, &self_ev, on_flat_device,
+                                                    &self_tok),
+                    0);
+        SX_CHECK_EQ(self_ev.count, 1);
+        SX_CHECK(GameInputUnregisterCallback(gi, self_tok, 0) != 0);
+
+        // Multi-threaded registration / unregistration stress
+        std::atomic<int> mt_failures{0};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t) {
+            threads.emplace_back([&, t]() {
+                for (int i = 0; i < 50; ++i) {
+                    FlatEvents ev{gi, false};
+                    uint64_t tk = 0;
+                    if (GameInputRegisterDeviceCallback(gi, 0, GAMEINPUT_KIND_GAMEPAD, GAMEINPUT_DEVICE_CONNECTED,
+                                                        GAMEINPUT_BLOCKING_ENUMERATION, &ev, on_flat_device,
+                                                        &tk) != 0 ||
+                        ev.count != 1 || GameInputUnregisterCallback(gi, tk, 1000) != 0) {
+                        mt_failures.fetch_add(1);
+                    }
+                    (void)t;
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+        SX_CHECK_EQ(mt_failures.load(), 0);
     }
 
     SX_CHECK_EQ(GameInputDestroy(gi), 0);

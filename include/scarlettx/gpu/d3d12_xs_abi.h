@@ -472,4 +472,20 @@ SCARLETTX_BVH_API int32_t XboxBvhDispatchRays(
     uint64_t* out_frame_hash);
 SCARLETTX_BVH_API int32_t XboxBvhDestroy(uint64_t handle);
 
+enum D3D12XBOX_AS_COPY_MODE : uint32_t {
+    D3D12XBOX_AS_COPY_MODE_CLONE = 0,
+    D3D12XBOX_AS_COPY_MODE_COMPACT = 1,
+};
+
+SCARLETTX_BVH_API int32_t XboxBvhGetCompactedSize(
+    uint64_t blas_handle,
+    uint64_t* out_size_bytes);
+SCARLETTX_BVH_API int32_t XboxBvhCompactBlas(
+    uint64_t src_blas_handle,
+    uint64_t* out_compacted_handle);
+SCARLETTX_BVH_API int32_t XboxBvhCopyAccelerationStructure(
+    uint64_t src_handle,
+    uint32_t copy_mode,
+    uint64_t* out_dst_handle);
+
 }  // extern "C"

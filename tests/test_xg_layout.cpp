@@ -274,6 +274,157 @@ void TestComputer() {
     SX_REQUIRE(Slot<RefFn>(linear, 1)(linear) == 0);
 }
 
+void TestTileModeAndNewComputers() {
+    // 1. XGComputeOptimalTileMode across resource dimensions & bind flags
+    SX_REQUIRE(XGComputeOptimalTileMode(1, 0, 4096, 1, 1, 1, 0) == XG_TILE_MODE_LINEAR);
+    SX_REQUIRE(XGComputeOptimalTileMode(1, 0, 0, 1, 1, 1, 0) == XG_TILE_MODE_INVALID);
+    SX_REQUIRE(XGComputeOptimalTileMode(2, kRgba8, 512, 1, 1, 1, 0x8) == XG_TILE_MODE_LINEAR);
+    SX_REQUIRE(XGComputeOptimalTileMode(2, kRgba8, 512, 1, 1, 1, 0x20) == XG_TILE_MODE_1D_THIN);
+    SX_REQUIRE(XGComputeOptimalTileMode(3, kRgba8, 1920, 1080, 1, 1, 0x8) == XG_TILE_MODE_2D_THIN);
+    SX_REQUIRE(XGComputeOptimalTileMode(3, kRgba8, 1920, 1080, 1, 1, 0x20) == XG_TILE_MODE_DISPLAY);
+    SX_REQUIRE(XGComputeOptimalTileMode(3, kRgba8, 1920, 1080, 1, 4, 0x20) == XG_TILE_MODE_2D_THIN);
+    SX_REQUIRE(XGComputeOptimalTileMode(3, 40, 1920, 1080, 1, 1, 0x40) == XG_TILE_MODE_DEPTH_STENCIL);
+    SX_REQUIRE(XGComputeOptimalTileMode(4, kRgba8, 64, 64, 16, 1, 0x8) == XG_TILE_MODE_2D_THICK);
+    SX_REQUIRE(XGComputeOptimalTileMode(4, kRgba8, 64, 64, 2, 1, 0x8) == XG_TILE_MODE_1D_THICK);
+    SX_REQUIRE(XGComputeOptimalTileMode(99, kRgba8, 64, 64, 1, 1, 0) == XG_TILE_MODE_INVALID);
+
+    using RefFn = uint32_t (SCARLETTX_XG_CALL*)(void*);
+    using LayoutFn = int32_t (SCARLETTX_XG_CALL*)(void*, XG_RESOURCE_LAYOUT*);
+    using SizeFn = uint64_t (SCARLETTX_XG_CALL*)(void*);
+    using MipFn = uint64_t (SCARLETTX_XG_CALL*)(void*, uint32_t, uint32_t);
+
+    // 2. XGCreateTexture1DComputer (4KB + 64KB, array + mip chain + copy roundtrip)
+    {
+        void* bad = nullptr;
+        SX_REQUIRE(XGCreateTexture1DComputer(nullptr, &bad) != 0);
+        XG_TEXTURE1D_DESC d1{};
+        d1.Width = 0;
+        SX_REQUIRE(XGCreateTexture1DComputer(&d1, &bad) != 0);
+
+        d1.Width = 128;
+        d1.MipLevels = 4;
+        d1.ArraySize = 2;
+        d1.Format = kRgba8;
+        d1.BindFlags = 0x8;
+        d1.SwizzleMode = XG_SWIZZLE_MODE_4KB_S;
+        void* c1 = nullptr;
+        SX_REQUIRE(XGCreateTexture1DComputer(&d1, &c1) == 0 && c1 != nullptr);
+
+        auto lay = std::make_unique<XG_RESOURCE_LAYOUT>();
+        SX_REQUIRE(Slot<LayoutFn>(c1, 2)(c1, lay.get()) == 0);
+        SX_REQUIRE(lay->Dimension == 2 && lay->MipLevels == 4 && lay->Planes == 1);
+        SX_REQUIRE(lay->BaseAlignmentBytes == 4096);
+        SX_REQUIRE(Slot<SizeFn>(c1, 3)(c1) == lay->SizeBytes);
+        SX_REQUIRE(Slot<SizeFn>(c1, 4)(c1) == 4096);
+        SX_REQUIRE(lay->SizeBytes % 4096 == 0);
+        SX_REQUIRE(lay->Plane[0].MipLayout[0].PitchBytes % 256 == 0);
+        SX_REQUIRE(lay->Plane[0].MipLayout[1].WidthElements == 64);
+
+        using Texel1DFn = uint64_t (SCARLETTX_XG_CALL*)(void*, uint32_t, uint32_t, uint64_t, uint32_t);
+        using CopyIn1DFn = int32_t (SCARLETTX_XG_CALL*)(void*, void*, uint32_t, uint32_t, const void*);
+        using CopyOut1DFn = int32_t (SCARLETTX_XG_CALL*)(void*, void*, const void*, uint32_t, uint32_t);
+
+        const uint64_t off_s0 = Slot<Texel1DFn>(c1, 6)(c1, 0, 0, 5, 0);
+        const uint64_t off_s1 = Slot<Texel1DFn>(c1, 6)(c1, 0, 0, 5, 1);
+        SX_REQUIRE(off_s0 == 20 && off_s1 == lay->Plane[0].Reserved10 + 20);
+        SX_REQUIRE(Slot<MipFn>(c1, 5)(c1, 0, 1) == lay->Plane[0].MipLayout[1].OffsetBytes);
+
+        std::vector<uint8_t> mem(static_cast<size_t>(lay->SizeBytes), 0);
+        std::vector<uint8_t> src(64 * 4);
+        for (size_t i = 0; i < src.size(); ++i) src[i] = static_cast<uint8_t>((i * 13 + 7) & 0xFF);
+        // subresource = slice * mips + mip => slice 1, mip 1 = subresource 5
+        SX_REQUIRE(Slot<CopyIn1DFn>(c1, 7)(c1, mem.data(), 0, 5, src.data()) == 0);
+        std::vector<uint8_t> dst(64 * 4, 0);
+        SX_REQUIRE(Slot<CopyOut1DFn>(c1, 8)(c1, dst.data(), mem.data(), 0, 5) == 0);
+        SX_REQUIRE(std::memcmp(src.data(), dst.data(), src.size()) == 0);
+
+        SX_REQUIRE(Slot<RefFn>(c1, 0)(c1) == 2);
+        SX_REQUIRE(Slot<RefFn>(c1, 1)(c1) == 1);
+        SX_REQUIRE(Slot<RefFn>(c1, 1)(c1) == 0);
+    }
+
+    // 3. XGCreateTexture3DComputer (64KB swizzle + mip chain + 3D volume copy roundtrip)
+    {
+        XG_TEXTURE3D_DESC d3{};
+        d3.Width = 32;
+        d3.Height = 16;
+        d3.Depth = 8;
+        d3.MipLevels = 3;
+        d3.Format = kRgba8;
+        d3.BindFlags = 0x8;
+        d3.SwizzleMode = XG_SWIZZLE_MODE_64KB_S;
+        void* c3 = nullptr;
+        SX_REQUIRE(XGCreateTexture3DComputer(&d3, &c3) == 0 && c3 != nullptr);
+
+        auto lay = std::make_unique<XG_RESOURCE_LAYOUT>();
+        SX_REQUIRE(Slot<LayoutFn>(c3, 2)(c3, lay.get()) == 0);
+        SX_REQUIRE(lay->Dimension == 4 && lay->MipLevels == 3 && lay->Planes == 1);
+        SX_REQUIRE(lay->BaseAlignmentBytes == 65536);
+        SX_REQUIRE(Slot<SizeFn>(c3, 4)(c3) == 65536);
+        SX_REQUIRE(lay->SizeBytes >= 65536 * 3 && lay->SizeBytes % 65536 == 0);
+        SX_REQUIRE(lay->Plane[0].MipLayout[0].DepthOrArraySize == 8);
+        SX_REQUIRE(lay->Plane[0].MipLayout[1].DepthOrArraySize == 4);
+        SX_REQUIRE(lay->Plane[0].MipLayout[2].DepthOrArraySize == 2);
+        SX_REQUIRE(lay->Plane[0].MipLayout[0].PitchBytes % 256 == 0);
+
+        using Texel3DFn = uint64_t (SCARLETTX_XG_CALL*)(void*, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t);
+        using CopyIn3DFn = int32_t (SCARLETTX_XG_CALL*)(void*, void*, uint32_t, uint32_t, const void*, uint32_t, uint32_t);
+        using CopyOut3DFn = int32_t (SCARLETTX_XG_CALL*)(void*, void*, uint32_t, uint32_t, const void*, uint32_t, uint32_t);
+
+        const uint64_t t0 = Slot<Texel3DFn>(c3, 6)(c3, 0, 0, 3, 2, 1);
+        const uint64_t t1 = Slot<Texel3DFn>(c3, 6)(c3, 0, 0, 3, 2, 2);
+        SX_REQUIRE(t1 - t0 == lay->Plane[0].MipLayout[0].Slice2DSizeBytes);
+
+        // Full 3D copy roundtrip on mip 1 (16 x 8 x 4 RGBA8)
+        std::vector<uint8_t> mem(static_cast<size_t>(lay->SizeBytes), 0);
+        const uint32_t row_pitch = 16 * 4;
+        const uint32_t depth_pitch = row_pitch * 8;
+        std::vector<uint8_t> vol_src(static_cast<size_t>(depth_pitch) * 4);
+        for (size_t i = 0; i < vol_src.size(); ++i) vol_src[i] = static_cast<uint8_t>((i * 29 + 3) & 0xFF);
+        SX_REQUIRE(Slot<CopyIn3DFn>(c3, 7)(c3, mem.data(), 0, 1, vol_src.data(), row_pitch, depth_pitch) == 0);
+        std::vector<uint8_t> vol_dst(vol_src.size(), 0);
+        SX_REQUIRE(Slot<CopyOut3DFn>(c3, 8)(c3, vol_dst.data(), row_pitch, depth_pitch, mem.data(), 0, 1) == 0);
+        SX_REQUIRE(std::memcmp(vol_src.data(), vol_dst.data(), vol_src.size()) == 0);
+        SX_REQUIRE(Slot<RefFn>(c3, 1)(c3) == 0);
+    }
+
+    // 4. XGCreateBufferComputer (64KB alignment, 256B pitch, copy + bounds checks)
+    {
+        void* bad = nullptr;
+        XG_BUFFER_DESC db{};
+        db.ByteWidth = 0;
+        SX_REQUIRE(XGCreateBufferComputer(&db, &bad) != 0);
+
+        db.ByteWidth = 1000;
+        db.StructureByteStride = 16;
+        db.BindFlags = 0x1;
+        void* cb = nullptr;
+        SX_REQUIRE(XGCreateBufferComputer(&db, &cb) == 0 && cb != nullptr);
+
+        auto lay = std::make_unique<XG_RESOURCE_LAYOUT>();
+        SX_REQUIRE(Slot<LayoutFn>(cb, 2)(cb, lay.get()) == 0);
+        SX_REQUIRE(lay->Dimension == 1 && lay->MipLevels == 1 && lay->Planes == 1);
+        SX_REQUIRE(lay->BaseAlignmentBytes == 65536);
+        SX_REQUIRE(lay->SizeBytes == 65536);
+        SX_REQUIRE(lay->Plane[0].BytesPerElement == 16);
+        SX_REQUIRE(lay->Plane[0].MipLayout[0].PitchBytes == 1024);  // AlignUp(1000, 256)
+
+        using BufOffFn = uint64_t (SCARLETTX_XG_CALL*)(void*);
+        using BufCopyFn = int32_t (SCARLETTX_XG_CALL*)(void*, void*, const void*, uint64_t, uint64_t);
+        SX_REQUIRE(Slot<BufOffFn>(cb, 5)(cb) == 0);
+
+        std::vector<uint8_t> mem(static_cast<size_t>(lay->SizeBytes), 0);
+        std::vector<uint8_t> payload(128, 0x5A);
+        SX_REQUIRE(Slot<BufCopyFn>(cb, 6)(cb, mem.data(), payload.data(), 256, 128) == 0);
+        // Out-of-bounds copy must fail
+        SX_REQUIRE(Slot<BufCopyFn>(cb, 6)(cb, mem.data(), payload.data(), 950, 128) != 0);
+        std::vector<uint8_t> back(128, 0);
+        SX_REQUIRE(Slot<BufCopyFn>(cb, 7)(cb, back.data(), mem.data(), 256, 128) == 0);
+        SX_REQUIRE(std::memcmp(payload.data(), back.data(), 128) == 0);
+        SX_REQUIRE(Slot<RefFn>(cb, 1)(cb) == 0);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -281,6 +432,7 @@ int main() {
     TestMipChain();
     TestRoundTrip();
     TestComputer();
+    TestTileModeAndNewComputers();
     std::printf("test_xg_layout: OK\n");
     return 0;
 }

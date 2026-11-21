@@ -967,3 +967,154 @@ int32_t GameInputInjectKeyState(
 }
 
 }  // extern "C"
+
+#include <condition_variable>
+#include <thread>
+
+namespace {
+
+struct FlatDeviceCallbackEntry {
+    uint64_t token = 0;
+    std::weak_ptr<GameInputObject> owner;
+    uint64_t device_id = 0;
+    uint32_t input_filter = 0;
+    uint32_t status_filter = 0;
+    void* context = nullptr;
+    GAMEINPUT_DEVICE_CALLBACK callback = nullptr;
+    bool active = true;
+    uint32_t in_flight = 0;
+    std::thread::id active_thread{};
+};
+
+struct FlatCallbackRegistry {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::unordered_map<uint64_t, std::shared_ptr<FlatDeviceCallbackEntry>> callbacks;
+};
+
+FlatCallbackRegistry& FlatCallbacks() {
+    static FlatCallbackRegistry reg;
+    return reg;
+}
+
+}  // namespace
+
+extern "C" {
+
+int32_t GameInputRegisterDeviceCallback(
+    uint64_t game_input,
+    uint64_t device_id,
+    uint32_t input_filter,
+    uint32_t status_filter,
+    uint32_t enumeration_kind,
+    void* context,
+    GAMEINPUT_DEVICE_CALLBACK callback,
+    uint64_t* out_callback_token) {
+    if (!callback) return kE_INVALIDARG;
+    auto obj = GetInstance(game_input);
+    if (!obj) return kE_HANDLE;
+
+    const uint64_t token = obj->next_callback_token.fetch_add(1, std::memory_order_relaxed);
+    if (out_callback_token) {
+        *out_callback_token = token;
+    }
+
+    auto entry = std::make_shared<FlatDeviceCallbackEntry>();
+    entry->token = token;
+    entry->owner = obj;
+    entry->device_id = device_id;
+    entry->input_filter = input_filter;
+    entry->status_filter = status_filter;
+    entry->context = context;
+    entry->callback = callback;
+    entry->active = true;
+
+    auto& reg = FlatCallbacks();
+    {
+        std::lock_guard<std::mutex> lk(reg.mu);
+        for (auto it = reg.callbacks.begin(); it != reg.callbacks.end();) {
+            if (it->second->owner.expired()) {
+                it = reg.callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        reg.callbacks[token] = entry;
+    }
+
+    if (enumeration_kind != GAMEINPUT_NO_ENUMERATION) {
+        std::vector<GAMEINPUT_DEVICE_INFO> snapshot;
+        uint64_t now_us = 0;
+        {
+            std::lock_guard<std::mutex> lk(obj->mu);
+            snapshot = obj->devices;
+            now_us = obj->NowUs();
+        }
+        for (const auto& d : snapshot) {
+            const uint32_t dev_status =
+                GAMEINPUT_DEVICE_CONNECTED | GAMEINPUT_DEVICE_INPUT_ENABLED |
+                (d.SupportedRumbleMotors != 0 ? GAMEINPUT_DEVICE_OUTPUT_ENABLED : 0u);
+            const bool dev_match = (device_id == 0) || (d.DeviceId == device_id);
+            const bool kind_match =
+                (input_filter == GAMEINPUT_KIND_UNKNOWN) || ((d.SupportedInput & input_filter) != 0);
+            const bool status_match =
+                (status_filter == GAMEINPUT_DEVICE_NO_STATUS) || ((dev_status & status_filter) != 0);
+            if (!dev_match || !kind_match || !status_match) {
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(reg.mu);
+                if (!entry->active) {
+                    break;
+                }
+                ++entry->in_flight;
+                entry->active_thread = std::this_thread::get_id();
+            }
+
+            callback(token, context, d.DeviceId, now_us, dev_status, GAMEINPUT_DEVICE_NO_STATUS);
+
+            {
+                std::lock_guard<std::mutex> lk(reg.mu);
+                --entry->in_flight;
+                if (entry->in_flight == 0) {
+                    entry->active_thread = std::thread::id{};
+                    reg.cv.notify_all();
+                }
+            }
+        }
+    }
+
+    return kS_OK;
+}
+
+int32_t GameInputUnregisterCallback(
+    uint64_t game_input,
+    uint64_t callback_token,
+    uint64_t timeout_us) {
+    auto obj = GetInstance(game_input);
+    if (!obj) return kE_HANDLE;
+    if (callback_token == 0) return kE_INVALIDARG;
+
+    auto& reg = FlatCallbacks();
+    std::unique_lock<std::mutex> lk(reg.mu);
+    auto it = reg.callbacks.find(callback_token);
+    if (it == reg.callbacks.end() || it->second->owner.lock() != obj) {
+        return kE_INVALIDARG;
+    }
+    std::shared_ptr<FlatDeviceCallbackEntry> entry = std::move(it->second);
+    reg.callbacks.erase(it);
+    entry->active = false;
+
+    if (entry->in_flight > 0 && entry->active_thread != std::this_thread::get_id()) {
+        if (timeout_us == UINT64_MAX) {
+            reg.cv.wait(lk, [&] { return entry->in_flight == 0; });
+        } else if (timeout_us > 0) {
+            reg.cv.wait_for(lk, std::chrono::microseconds(timeout_us),
+                            [&] { return entry->in_flight == 0; });
+        }
+    }
+    return kS_OK;
+}
+
+}  // extern "C"

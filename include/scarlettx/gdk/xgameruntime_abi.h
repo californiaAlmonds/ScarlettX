@@ -160,6 +160,10 @@ SCARLETTX_XGR_API XGameResult XTaskQueueRegisterWaiter(
 SCARLETTX_XGR_API void XTaskQueueUnregisterWaiter(
     XTaskQueueHandle queue,
     XTaskQueueRegistrationToken token);
+// Returns true when `port` is a Manual port with at least one ready callback.
+SCARLETTX_XGR_API bool XTaskQueueCanDispatch(
+    XTaskQueueHandle queue,
+    XTaskQueuePort port);
 
 // ---------------------------------------------------------------------------
 // XAsync.h
@@ -208,6 +212,14 @@ SCARLETTX_XGR_API XGameResult XAsyncBegin(
     const void* identity,
     const char* identityName,
     XAsyncProvider* provider);
+// Allocates a zero-initialized provider context of `contextSize` bytes owned
+// by the runtime and freed automatically after XAsyncOp_Cleanup.
+SCARLETTX_XGR_API XGameResult XAsyncBeginAlloc(
+    XAsyncBlock* asyncBlock,
+    const void* identity,
+    const char* identityName,
+    XAsyncProvider* provider,
+    size_t contextSize);
 SCARLETTX_XGR_API XGameResult XAsyncSchedule(XAsyncBlock* asyncBlock, uint32_t delayInMs);
 SCARLETTX_XGR_API void XAsyncComplete(
     XAsyncBlock* asyncBlock,

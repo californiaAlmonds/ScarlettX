@@ -10,9 +10,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
+#include <new>
 #include <thread>
 #include <unordered_set>
 
@@ -831,6 +833,20 @@ void XTaskQueueUnregisterWaiter(XTaskQueueHandle /*queue*/, XTaskQueueRegistrati
 #endif
 }
 
+bool XTaskQueueCanDispatch(XTaskQueueHandle queue, XTaskQueuePort port) {
+    Engine& e = GetEngine();
+    Lock lk(e.mutex);
+    const std::shared_ptr<QueueCore> core = LookupLocked(e, queue);
+    if (!core || static_cast<uint32_t>(port) > 1) {
+        return false;
+    }
+    const std::shared_ptr<Port> p = core->ports[static_cast<uint32_t>(port)];
+    if (p->mode != XTaskQueueDispatchMode_Manual) {
+        return false;
+    }
+    return !p->ready.empty();
+}
+
 }  // extern "C"
 
 // ---------------------------------------------------------------------------
@@ -844,6 +860,7 @@ struct AsyncState {
     XAsyncProvider* provider = nullptr;
     const void* identity = nullptr;
     XTaskQueueHandle queue = nullptr;  // owned duplicate
+    void* owned_context = nullptr;     // allocated by XAsyncBeginAlloc; freed on destruction
 
     std::mutex mutex;
     std::condition_variable cv;
@@ -874,6 +891,7 @@ void ReleaseState(AsyncState* s) {
         if (s->queue) {
             XTaskQueueCloseHandle(s->queue);
         }
+        std::free(s->owned_context);
         delete s;
     }
 }
@@ -1140,8 +1158,13 @@ void XAsyncCancel(XAsyncBlock* asyncBlock) {
     InvokeProvider(s.s, XAsyncOp_Cancel, &s->data, true);
 }
 
-XGameResult XAsyncBegin(XAsyncBlock* asyncBlock, void* context, const void* identity,
-                        const char* /*identityName*/, XAsyncProvider* provider) {
+static XGameResult AsyncBeginInternal(XAsyncBlock* asyncBlock,
+                                      void* context,
+                                      bool alloc_context,
+                                      size_t context_size,
+                                      const void* identity,
+                                      const char* /*identityName*/,
+                                      XAsyncProvider* provider) {
     if (!asyncBlock || !provider) {
         return XGR_E_INVALIDARG;
     }
@@ -1154,12 +1177,28 @@ XGameResult XAsyncBegin(XAsyncBlock* asyncBlock, void* context, const void* iden
         return XGR_E_NO_TASK_QUEUE;
     }
 
-    auto* s = new AsyncState();
+    void* owned = nullptr;
+    if (alloc_context && context_size > 0) {
+        owned = std::calloc(1, context_size);
+        if (!owned) {
+            XTaskQueueCloseHandle(queue);
+            return XGR_E_OUTOFMEMORY;
+        }
+        context = owned;
+    }
+
+    auto* s = new (std::nothrow) AsyncState();
+    if (!s) {
+        std::free(owned);
+        XTaskQueueCloseHandle(queue);
+        return XGR_E_OUTOFMEMORY;
+    }
     s->data.async = asyncBlock;
     s->data.context = context;
     s->provider = provider;
     s->identity = identity;
     s->queue = queue;
+    s->owned_context = owned;
     s->refs.fetch_add(1);  // ours, for the calls below
     {
         std::lock_guard<std::mutex> lock(BlockLock(asyncBlock));
@@ -1173,6 +1212,18 @@ XGameResult XAsyncBegin(XAsyncBlock* asyncBlock, void* context, const void* iden
     }
     ReleaseState(s);
     return XGR_S_OK;
+}
+
+XGameResult XAsyncBegin(XAsyncBlock* asyncBlock, void* context, const void* identity,
+                        const char* identityName, XAsyncProvider* provider) {
+    return AsyncBeginInternal(asyncBlock, context, false, 0, identity, identityName, provider);
+}
+
+XGameResult XAsyncBeginAlloc(XAsyncBlock* asyncBlock, const void* identity,
+                             const char* identityName, XAsyncProvider* provider,
+                             size_t contextSize) {
+    return AsyncBeginInternal(asyncBlock, nullptr, true, contextSize, identity, identityName,
+                              provider);
 }
 
 XGameResult XAsyncSchedule(XAsyncBlock* asyncBlock, uint32_t delayInMs) {

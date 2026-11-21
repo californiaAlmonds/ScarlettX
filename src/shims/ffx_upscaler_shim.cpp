@@ -225,4 +225,17 @@ ffxReturnCode_t ffxUpscalerDispatch(ffxContext* context, const ffxApiHeader* des
     return FFX_API_RETURN_OK;
 }
 
+ffxReturnCode_t ffxUpscalerGetVersion(uint64_t* outVersionId, const char** outVersionName) {
+    if (!outVersionId && !outVersionName) {
+        return FFX_API_RETURN_ERROR_PARAMETER;
+    }
+    if (outVersionId) {
+        *outVersionId = 0x00030102ull;  // FSR 3.1.2 HLE
+    }
+    if (outVersionName) {
+        *outVersionName = "ScarlettX FidelityFX Upscaler 3.1.2-HLE";
+    }
+    return FFX_API_RETURN_OK;
+}
+
 }  // extern "C"

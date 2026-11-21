@@ -74,6 +74,77 @@ SCARLETTX_BINK2_API void BinkSetVolume(BINK* bnk, uint32_t track_id, int32_t vol
 SCARLETTX_BINK2_API void BinkGetSummary(BINK* bnk, BINKSUMMARY* sum);
 SCARLETTX_BINK2_API const char* BinkGetError(void);
 
+// Background IO control flags
+enum {
+    BINKBGIOSUSPEND = 1,
+    BINKBGIORESUME = 2,
+    BINKBGIOFORCE = 0x80000000u
+};
+
+typedef void* (*BINKMEMALLOC)(uint64_t bytes);
+typedef void (*BINKMEMFREE)(void* ptr);
+
+typedef struct BINK_OPEN_OPTIONS {
+    uint64_t FileOffset;
+    int64_t TotTracks;
+    int32_t* TrackNums;
+    uint32_t MaxBufferSize;
+    uint32_t Reserved;
+} BINK_OPEN_OPTIONS;
+
+typedef struct BINKFRAMEPLANESET {
+    void* YPlane;
+    uint32_t YPitch;
+    void* cRPlane;
+    uint32_t cRPitch;
+    void* cBPlane;
+    uint32_t cBPitch;
+    void* APlane;
+    uint32_t APitch;
+} BINKFRAMEPLANESET;
+
+typedef struct BINKFRAMEBUFFERS {
+    int32_t TotalFrames;
+    uint32_t YABufferWidth;
+    uint32_t YABufferHeight;
+    uint32_t cRcBBufferWidth;
+    uint32_t cRcBBufferHeight;
+    uint32_t FrameNum;
+    BINKFRAMEPLANESET Frames[2];
+} BINKFRAMEBUFFERS;
+
+typedef struct BINKREALTIME {
+    uint32_t FrameNum;
+    uint32_t FrameRate;
+    uint32_t FrameRateDiv;
+    uint32_t Frames;
+    uint32_t FramesTime;
+    uint32_t FramesVideoDecompTime;
+    uint32_t FramesAudioDecompTime;
+    uint32_t FramesReadTime;
+    uint32_t FramesIdleReadTime;
+    uint32_t FramesThreadReadTime;
+    uint32_t FramesBlitTime;
+    uint32_t ReadBufferSize;
+    uint32_t ReadBufferUsed;
+    uint32_t FramesDataRate;
+} BINKREALTIME;
+
+SCARLETTX_BINK2_API BINK* BinkOpenWithOptions(
+    const char* name,
+    const BINK_OPEN_OPTIONS* opts,
+    uint32_t flags);
+SCARLETTX_BINK2_API void BinkSetMemory(BINKMEMALLOC alloc_fn, BINKMEMFREE free_fn);
+SCARLETTX_BINK2_API int32_t BinkControlBackgroundIO(BINK* bnk, uint32_t control);
+SCARLETTX_BINK2_API int32_t BinkDoFrameAsync(BINK* bnk, uint32_t thread_one, uint32_t thread_two);
+SCARLETTX_BINK2_API int32_t BinkDoFrameAsyncWait(BINK* bnk, int32_t us);
+SCARLETTX_BINK2_API void BinkRegisterFrameBuffers(BINK* bnk, BINKFRAMEBUFFERS* set);
+SCARLETTX_BINK2_API void BinkGetFrameBuffersInfo(BINK* bnk, BINKFRAMEBUFFERS* set);
+SCARLETTX_BINK2_API void BinkSetFrameRate(uint32_t forcerate, uint32_t forceratediv);
+SCARLETTX_BINK2_API void BinkGetRealtime(BINK* bnk, BINKREALTIME* run, uint32_t frames);
+SCARLETTX_BINK2_API int32_t BinkShouldSkip(BINK* bnk);
+SCARLETTX_BINK2_API void BinkService(BINK* bnk);
+
 #ifdef __cplusplus
 }
 #endif
