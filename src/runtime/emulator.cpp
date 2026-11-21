@@ -120,10 +120,12 @@ Status Emulator::BootPackage(const std::string& package_dir) {
         set_env("SCARLETTX_MAX_FRAMES", std::to_string(config_.max_frames).c_str());
     }
     if (!config_.rt_dump_path.empty()) {
-        set_env("SCARLETTX_RT_DUMP", config_.rt_dump_path.c_str());
+        set_env("SCARLETTX_RT_DUMP",
+                std::filesystem::absolute(config_.rt_dump_path).string().c_str());
     }
     if (!config_.raster_dump_path.empty()) {
-        set_env("SCARLETTX_RASTER_DUMP", config_.raster_dump_path.c_str());
+        set_env("SCARLETTX_RASTER_DUMP",
+                std::filesystem::absolute(config_.raster_dump_path).string().c_str());
     }
 
     if (config_.in_process) {

@@ -111,7 +111,7 @@ int main() {
     const std::filesystem::path inproc_frame0 = bin_dir / "arena_inproc_frame0.ppm";
     const std::filesystem::path inproc_frame3 = bin_dir / "arena_inproc_frame3.ppm";
     const std::filesystem::path inproc_wav = bin_dir / "arena_inproc_audio.wav";
-    const std::filesystem::path proc_frame0 = bin_dir / "arena_proc_frame0.ppm";
+    const std::filesystem::path proc_frame0 = std::filesystem::absolute("arena_proc_frame0.ppm");
     const std::filesystem::path proc_frame3 = bin_dir / "arena_proc_frame3.ppm";
 
     // 1. Build synthetic XVD asset container with compressed arena geometry + XMA2 SFX.
@@ -195,7 +195,10 @@ int main() {
     proc_cfg.headless = true;
     proc_cfg.prefer_warp = true;
     proc_cfg.in_process = false;
-    proc_cfg.rt_dump_path = proc_frame0.string();
+    // Relative: has to land in this process's working directory, not the guest's.
+    proc_cfg.rt_dump_path = proc_frame0.filename().string();
+    std::error_code ec;
+    std::filesystem::remove(proc_frame0, ec);
 
     scarlettx::Emulator emu_proc(proc_cfg);
     auto st2 = emu_proc.BootPackage(pkg_dir.string());
