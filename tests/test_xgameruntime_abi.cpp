@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -118,9 +119,11 @@ void SCARLETTX_GDK_CALLBACK CustomFree(void* ptr, uint64_t attr) {
 int main() {
     // Isolate GameSave directory for this test run.
     namespace fs = std::filesystem;
-    fs::path save_root = fs::temp_directory_path() / "scarlettx_test_gamesave_abi";
+    fs::path sandbox = fs::temp_directory_path() / "scarlettx_test_gamesave_abi";
+    // Nested so that a name escaping the save root still lands in the sandbox.
+    fs::path save_root = sandbox / "a" / "b" / "saves";
     std::error_code ec;
-    fs::remove_all(save_root, ec);
+    fs::remove_all(sandbox, ec);
 #if defined(_WIN32)
     _putenv_s("SCARLETTX_SAVE_ROOT", save_root.string().c_str());
 #else
@@ -268,6 +271,28 @@ int main() {
     XGameSaveContainerHandle container = nullptr;
     CHECK(XGameSaveCreateContainer(provider, "slot_0", &container) == XGR_S_OK && container != nullptr);
 
+    // Names made only of dots resolve to the provider directory or above it.
+    const fs::path sentinel = save_root / "sentinel";
+    std::ofstream(sentinel).put('x');
+    XGameSaveUpdateHandle dot_update = nullptr;
+    CHECK(XGameSaveCreateUpdate(container, nullptr, &dot_update) == XGR_S_OK);
+    for (const char* dots : {"..", ".", "..."}) {
+        XGameSaveProviderHandle dot_provider = nullptr;
+        XGameSaveContainerHandle dot_container = nullptr;
+        XGameSaveBlob dot_blob{};
+        uint32_t dot_count = 1;
+        XAsyncBlock dot_async{};
+        CHECK(XGameSaveDeleteContainer(provider, dots) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveCreateContainer(provider, dots, &dot_container) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveInitializeProvider(user, dots, false, &dot_provider) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveSubmitBlobWrite(dot_update, dots, nullptr, 0) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveSubmitBlobDelete(dot_update, dots) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveReadBlobData(container, &dots, &dot_count, sizeof(dot_blob), &dot_blob) == XGR_E_INVALIDARG);
+        CHECK(XGameSaveReadBlobDataAsync(container, &dots, 1, &dot_async) == XGR_E_INVALIDARG);
+    }
+    XGameSaveCloseUpdate(dot_update);
+    CHECK(fs::exists(sentinel));
+
     XGameSaveUpdateHandle update = nullptr;
     CHECK(XGameSaveCreateUpdate(container, "Slot 0", &update) == XGR_S_OK && update != nullptr);
     const std::string payload = "ScarlettX_SaveData_v1_HP=100_LV=99";
@@ -368,7 +393,7 @@ int main() {
     XTaskQueueCloseHandle(tp_q);
     XGameRuntimeUninitialize();
 
-    fs::remove_all(save_root, ec);
+    fs::remove_all(sandbox, ec);
 
     std::cout << "[test_xgameruntime_abi] PASSED (XTaskQueue, XAsync, XSystem, XUser, XGameSave, XMem, XThread)\n";
     return 0;

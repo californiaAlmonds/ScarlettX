@@ -163,6 +163,11 @@ std::string SanitizeSaveName(const std::string& raw) {
     return out.empty() ? "default" : out;
 }
 
+// A name of only dots resolves to the directory itself or its parent.
+bool IsValidSaveName(const char* name) {
+    return name && name[std::strspn(name, ".")] != '\0';
+}
+
 fs::path ResolveSaveRoot(const std::string& config_id) {
     const char* env_root = std::getenv("SCARLETTX_SAVE_ROOT");
     fs::path base = (env_root && *env_root)
@@ -486,7 +491,7 @@ XGameResult XGameSaveInitializeProvider(
     const char* configurationId,
     bool /*syncOnDemand*/,
     XGameSaveProviderHandle* provider) {
-    if (!requestingUser || !configurationId || !*configurationId || !provider) {
+    if (!requestingUser || !IsValidSaveName(configurationId) || !provider) {
         return XGR_E_INVALIDARG;
     }
     auto* p = new (std::nothrow) XGameSaveProvider();
@@ -573,7 +578,7 @@ XGameResult XGameSaveCreateContainer(
     XGameSaveProviderHandle provider,
     const char* name,
     XGameSaveContainerHandle* containerContext) {
-    if (!provider || !name || !*name || !containerContext) {
+    if (!provider || !IsValidSaveName(name) || !containerContext) {
         return XGR_E_INVALIDARG;
     }
     auto* c = new (std::nothrow) XGameSaveContainer();
@@ -606,7 +611,7 @@ void XGameSaveCloseContainer(XGameSaveContainerHandle context) {
 XGameResult XGameSaveDeleteContainer(
     XGameSaveProviderHandle provider,
     const char* name) {
-    if (!provider || !name || !*name) {
+    if (!provider || !IsValidSaveName(name)) {
         return XGR_E_INVALIDARG;
     }
     std::lock_guard<std::mutex> lock(provider->mutex);
@@ -695,7 +700,7 @@ XGameResult XGameSaveSubmitBlobWrite(
     const char* blobName,
     const uint8_t* data,
     size_t byteCount) {
-    if (!updateContext || !blobName || !*blobName || (!data && byteCount > 0)) {
+    if (!updateContext || !IsValidSaveName(blobName) || (!data && byteCount > 0)) {
         return XGR_E_INVALIDARG;
     }
     std::vector<uint8_t> copy;
@@ -709,7 +714,7 @@ XGameResult XGameSaveSubmitBlobWrite(
 XGameResult XGameSaveSubmitBlobDelete(
     XGameSaveUpdateHandle updateContext,
     const char* blobName) {
-    if (!updateContext || !blobName || !*blobName) {
+    if (!updateContext || !IsValidSaveName(blobName)) {
         return XGR_E_INVALIDARG;
     }
     updateContext->pending_writes.erase(blobName);
@@ -789,7 +794,7 @@ XGameResult XGameSaveReadBlobData(
     uint32_t read_count = 0;
 
     for (uint32_t i = 0; i < requested; ++i) {
-        if (!blobNames[i]) {
+        if (!IsValidSaveName(blobNames[i])) {
             return XGR_E_INVALIDARG;
         }
         const std::string name = blobNames[i];
@@ -838,7 +843,7 @@ XGameResult XGameSaveReadBlobDataAsync(
     std::vector<std::string> names;
     names.reserve(countOfBlobs);
     for (uint32_t i = 0; i < countOfBlobs; ++i) {
-        if (!blobNames[i]) {
+        if (!IsValidSaveName(blobNames[i])) {
             return XGR_E_INVALIDARG;
         }
         names.emplace_back(blobNames[i]);
