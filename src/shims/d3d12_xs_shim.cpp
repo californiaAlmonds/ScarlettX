@@ -384,6 +384,16 @@ intptr_t SCARLETTX_GDK_CALLBACK DescHeapProxySetName(void* self, uintptr_t name_
     return 0;
 }
 
+intptr_t SCARLETTX_GDK_CALLBACK DescHeapProxyGetDesc(void* self, uintptr_t sret_ptr, uintptr_t, uintptr_t) {
+#if defined(_WIN32)
+    auto* obj = static_cast<XboxD3D12DescriptorHeapProxy*>(self);
+    if (sret_ptr) {
+        *reinterpret_cast<D3D12_DESCRIPTOR_HEAP_DESC*>(sret_ptr) = obj->orig_desc;
+    }
+#endif
+    return static_cast<intptr_t>(sret_ptr);
+}
+
 intptr_t SCARLETTX_GDK_CALLBACK DescHeapProxyGetCPUStart(void* self, uintptr_t, uintptr_t, uintptr_t) {
 #if defined(_WIN32)
     auto* obj = static_cast<XboxD3D12DescriptorHeapProxy*>(self);
@@ -433,6 +443,7 @@ constexpr std::array<ComVtableFn, sizeof...(Is) + 3> MakeDescHeapProxyVtable(std
 std::array<ComVtableFn, 16> BuildDescHeapProxyVtable() {
     auto vtbl = MakeDescHeapProxyVtable(std::make_index_sequence<13>{});
     vtbl[6] = &DescHeapProxySetName;      // +0x30
+    vtbl[8] = &DescHeapProxyGetDesc;      // +0x40
     vtbl[9] = &DescHeapProxyGetCPUStart;  // +0x48 (verified in ConceptDestruction.exe: returns SIZE_T in RAX)
     vtbl[10] = &DescHeapProxyGetGPUStart; // +0x50
     return vtbl;
@@ -687,6 +698,15 @@ intptr_t SCARLETTX_GDK_CALLBACK HeapRelease(void* self, uintptr_t, uintptr_t, ui
     if (rem == 0) delete obj;
     return static_cast<intptr_t>(rem);
 }
+intptr_t SCARLETTX_GDK_CALLBACK HeapGetDesc(void* self, uintptr_t sret_ptr, uintptr_t, uintptr_t) {
+#if defined(_WIN32)
+    auto* obj = static_cast<XboxD3D12HeapProxy*>(self);
+    if (sret_ptr) {
+        *reinterpret_cast<D3D12_HEAP_DESC*>(sret_ptr) = obj->desc;
+    }
+#endif
+    return static_cast<intptr_t>(sret_ptr);
+}
 template <int Slot>
 intptr_t SCARLETTX_GDK_CALLBACK HeapTracedSlot(void* /*self*/, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     if (TraceEnabled()) {
@@ -699,7 +719,12 @@ template <size_t... Is>
 constexpr std::array<ComVtableFn, sizeof...(Is) + 3> MakeHeapVtable(std::index_sequence<Is...>) {
     return {&HeapQueryInterface, &HeapAddRef, &HeapRelease, &HeapTracedSlot<static_cast<int>(Is + 3)>...};
 }
-const auto kXboxHeapProxyVtbl = MakeHeapVtable(std::make_index_sequence<13>{});
+std::array<ComVtableFn, 16> BuildHeapVtable() {
+    auto vtbl = MakeHeapVtable(std::make_index_sequence<13>{});
+    vtbl[8] = &HeapGetDesc;
+    return vtbl;
+}
+const auto kXboxHeapProxyVtbl = BuildHeapVtable();
 
 struct GuestTextureMemory;
 struct XboxD3D12ResourceProxy {
