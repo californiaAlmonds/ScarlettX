@@ -152,6 +152,16 @@ set_target_properties(kernelx PROPERTIES PREFIX "" OUTPUT_NAME "kernelx")
 target_link_libraries(kernelx PRIVATE scarlettx_core)
 target_compile_definitions(kernelx PRIVATE SCARLETTX_BUILDING_KERNELX=1)
 
+add_library(xsapi_gdk SHARED src/shims/xsapi_shim.cpp)
+set_target_properties(xsapi_gdk PROPERTIES PREFIX "" OUTPUT_NAME "Microsoft.Xbox.Services.GDK.C")
+target_link_libraries(xsapi_gdk PRIVATE scarlettx_core xgameruntime)
+target_compile_definitions(xsapi_gdk PRIVATE SCARLETTX_BUILDING_XSAPI=1)
+
+add_library(winrt_xs SHARED src/shims/winrt_shim.cpp)
+set_target_properties(winrt_xs PROPERTIES PREFIX "" OUTPUT_NAME "winrt_xs")
+target_link_libraries(winrt_xs PRIVATE scarlettx_core)
+target_compile_definitions(winrt_xs PRIVATE SCARLETTX_BUILDING_WINRT=1)
+
 # ---------------------------------------------------------------------------
 # ScarlettX CLI Emulator Runner
 # ---------------------------------------------------------------------------
@@ -173,6 +183,8 @@ add_dependencies(scarlettx
     libHttpClient_GDK
     XCurl
     kernelx
+    xsapi_gdk
+    winrt_xs
 )
 
 # ---------------------------------------------------------------------------
@@ -364,6 +376,9 @@ target_link_libraries(test_middleware_net PRIVATE
     XCurl
     xgameruntime
 )
+
+scarlettx_add_test(test_xsapi_winrt tests/test_xsapi_winrt.cpp)
+target_link_libraries(test_xsapi_winrt PRIVATE xgameruntime xsapi_gdk winrt_xs)
 
 scarlettx_add_test(test_scarlett_arena_e2e tests/test_scarlett_arena_e2e.cpp)
 target_link_libraries(test_scarlett_arena_e2e PRIVATE dstorage)
