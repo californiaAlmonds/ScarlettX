@@ -17,6 +17,7 @@ add_library(scarlettx_core STATIC
     src/loader/stub_thunk.cpp
     src/loader/package_vfs.cpp
     src/loader/xvd_container.cpp
+    src/io/gdeflate.cpp
     src/kernel/xmemory.cpp
     src/kernel/xruntime.cpp
     src/kernel/xstorage.cpp
@@ -319,6 +320,8 @@ target_link_libraries(test_d3d12_xs_abi PRIVATE d3d12_xs XboxBvhBuilder)
 scarlettx_add_test(test_rt_pipeline tests/test_rt_pipeline.cpp)
 scarlettx_add_test(test_dstorage_xvd tests/test_dstorage_xvd.cpp)
 target_link_libraries(test_dstorage_xvd PRIVATE dstorage)
+scarlettx_add_test(test_gdeflate tests/test_gdeflate.cpp)
+target_link_libraries(test_gdeflate PRIVATE dstorage)
 scarlettx_add_test(test_xaudio2 tests/test_xaudio2.cpp)
 target_link_libraries(test_xaudio2 PRIVATE xaudio2_9)
 scarlettx_add_test(test_xaudio2_guest tests/test_xaudio2_guest.cpp)

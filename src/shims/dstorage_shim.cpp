@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "scarlettx/io/gdeflate.h"
 #include "scarlettx/loader/xvd_container.h"
 
 namespace {
@@ -249,8 +250,20 @@ int32_t ExecuteRequest(const DSTORAGE_REQUEST& req) {
         return kS_OK;
     }
 
-    if (req.CompressionFormat == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE ||
-        req.CompressionFormat == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+    if (req.CompressionFormat == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+        size_t out_sz = 0;
+        const auto res = scarlettx::GDeflateDecompress(
+            raw.data(),
+            raw.size(),
+            static_cast<uint8_t*>(req.DestinationMemory),
+            req.DestinationSize,
+            &out_sz);
+        if (res == scarlettx::GDeflateResult::Ok) return kS_OK;
+        if (res == scarlettx::GDeflateResult::BufferTooSmall) return kE_DSTORAGE_BUFFER_TOO_SMALL;
+        return kE_FAIL;
+    }
+
+    if (req.CompressionFormat == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE) {
         uint32_t out_sz = 0;
         return DecompressLzRle(
             raw.data(),
@@ -661,8 +674,23 @@ int32_t DStorageCompressBuffer(
         if (src_size > 0 && src) std::memcpy(dst, src, src_size);
         return kS_OK;
     }
-    if (format == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE ||
-        format == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+    if (format == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+        if (!out_compressed_size) return kE_INVALIDARG;
+        if (src_size > 0 && !src) return kE_INVALIDARG;
+        std::vector<uint8_t> comp;
+        if (!scarlettx::GDeflateCompress(static_cast<const uint8_t*>(src), src_size, comp)) {
+            return kE_FAIL;
+        }
+        *out_compressed_size = static_cast<uint32_t>(comp.size());
+        if (!dst || dst_capacity < comp.size()) {
+            return kE_DSTORAGE_BUFFER_TOO_SMALL;
+        }
+        if (!comp.empty()) {
+            std::memcpy(dst, comp.data(), comp.size());
+        }
+        return kS_OK;
+    }
+    if (format == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE) {
         return CompressLzRle(
             static_cast<const uint8_t*>(src),
             src_size,
@@ -687,8 +715,22 @@ int32_t DStorageDecompressBuffer(
         if (src_size > 0 && src) std::memcpy(dst, src, src_size);
         return kS_OK;
     }
-    if (format == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE ||
-        format == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+    if (format == DSTORAGE_COMPRESSION_FORMAT_GDEFLATE) {
+        if (!out_decompressed_size) return kE_INVALIDARG;
+        size_t out_sz = 0;
+        const auto res = scarlettx::GDeflateDecompress(
+            static_cast<const uint8_t*>(src),
+            src_size,
+            static_cast<uint8_t*>(dst),
+            dst_capacity,
+            &out_sz);
+        *out_decompressed_size = static_cast<uint32_t>(out_sz);
+        if (res == scarlettx::GDeflateResult::Ok) return kS_OK;
+        if (res == scarlettx::GDeflateResult::BufferTooSmall) return kE_DSTORAGE_BUFFER_TOO_SMALL;
+        if (res == scarlettx::GDeflateResult::InvalidArg) return kE_INVALIDARG;
+        return kE_FAIL;
+    }
+    if (format == DSTORAGE_COMPRESSION_FORMAT_LZ_RLE) {
         return DecompressLzRle(
             static_cast<const uint8_t*>(src),
             src_size,
